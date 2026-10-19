@@ -1,0 +1,8 @@
+{
+  "variants": {
+    "facing=north": { "model": "sheetmusic:block/piano" },
+    "facing=east":  { "model": "sheetmusic:block/piano", "y": 90 },
+    "facing=south": { "model": "sheetmusic:block/piano", "y": 180 },
+    "facing=west":  { "model": "sheetmusic:block/piano", "y": 270 }
+  }
+}

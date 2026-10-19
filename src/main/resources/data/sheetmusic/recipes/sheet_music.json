@@ -1,0 +1,10 @@
+{
+  "type": "minecraft:crafting_shapeless",
+  "category": "misc",
+  "ingredients": [
+    { "item": "minecraft:paper" },
+    { "item": "minecraft:ink_sac" },
+    { "item": "minecraft:feather" }
+  ],
+  "result": { "item": "sheetmusic:sheet_music", "count": 1 }
+}

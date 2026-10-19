@@ -1,0 +1,19 @@
+{
+  "item.sheetmusic.sheet_music": "Sheet Music",
+  "block.sheetmusic.piano": "Piano",
+  "itemGroup.sheetmusic": "Sheet Music",
+  "gui.sheetmusic.title": "Title",
+  "gui.sheetmusic.bpm": "BPM %s",
+  "gui.sheetmusic.page": "Page %s/%s",
+  "gui.sheetmusic.play": "Preview",
+  "gui.sheetmusic.stop": "Stop",
+  "gui.sheetmusic.clear_page": "Clear page",
+  "gui.sheetmusic.done": "Done",
+  "gui.sheetmusic.note": "Note: %s",
+  "gui.sheetmusic.hint": "Click: add/remove",
+  "tooltip.sheetmusic.info": "%s notes · BPM %s",
+  "message.sheetmusic.empty": "This sheet is blank. Sneak + right-click to compose.",
+  "message.sheetmusic.playing": "Now playing",
+  "message.sheetmusic.stopped": "Stopped",
+  "message.sheetmusic.hint": "Right-click with a sheet to play"
+}

@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "sheetmusic",
+  "version": "${version}",
+  "name": "Sheet Music",
+  "description": "악보 아이템으로 곡을 작곡하고 피아노 블록으로 연주합니다.",
+  "authors": [],
+  "license": "MIT",
+  "environment": "*",
+  "entrypoints": {
+    "main": ["com.example.sheetmusic.SheetMusicMod"],
+    "client": ["com.example.sheetmusic.SheetMusicClient"]
+  },
+  "depends": {
+    "fabricloader": ">=0.14.21",
+    "minecraft": "~1.20.1",
+    "java": ">=17",
+    "fabric-api": "*"
+  }
+}

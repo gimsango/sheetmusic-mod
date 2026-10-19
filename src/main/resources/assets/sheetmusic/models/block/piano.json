@@ -1,0 +1,8 @@
+{
+  "parent": "minecraft:block/orientable",
+  "textures": {
+    "top": "sheetmusic:block/piano_top",
+    "front": "sheetmusic:block/piano_front",
+    "side": "sheetmusic:block/piano_side"
+  }
+}

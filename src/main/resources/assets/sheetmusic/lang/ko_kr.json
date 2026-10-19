@@ -1,0 +1,19 @@
+{
+  "item.sheetmusic.sheet_music": "악보",
+  "block.sheetmusic.piano": "피아노",
+  "itemGroup.sheetmusic": "악보 모드",
+  "gui.sheetmusic.title": "제목",
+  "gui.sheetmusic.bpm": "BPM %s",
+  "gui.sheetmusic.page": "페이지 %s/%s",
+  "gui.sheetmusic.play": "미리듣기",
+  "gui.sheetmusic.stop": "정지",
+  "gui.sheetmusic.clear_page": "페이지 지우기",
+  "gui.sheetmusic.done": "완료",
+  "gui.sheetmusic.note": "음: %s",
+  "gui.sheetmusic.hint": "클릭:넣기/빼기",
+  "tooltip.sheetmusic.info": "음표 %s개 · BPM %s",
+  "message.sheetmusic.empty": "비어 있는 악보입니다. 웅크리고 우클릭해서 작곡하세요.",
+  "message.sheetmusic.playing": "연주를 시작합니다",
+  "message.sheetmusic.stopped": "연주를 멈췄습니다",
+  "message.sheetmusic.hint": "악보를 들고 우클릭하면 연주합니다"
+}
