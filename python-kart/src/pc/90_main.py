@@ -37,17 +37,33 @@ def parse_args(argv):
 
 
 def main():
-    args = parse_args(sys.argv)
-    if args.get('serve'):
-        serve_forever(args.get('port', DEFAULT_PORT))
-        return
-    game = Game(args)
+    game = None
     try:
+        args = parse_args(sys.argv)
+        if args.get('serve'):
+            serve_forever(args.get('port', DEFAULT_PORT))
+            return
+        game = Game(args)
         game.run()
+    except (SystemExit, KeyboardInterrupt):
+        raise
+    except BaseException:
+        import traceback
+        text = traceback.format_exc()
+        print(text)
+        path = _crash_log(text)
+        print('=' * 64)
+        print('오류가 발생했습니다. 위의 내용을 그대로 알려주세요.  /  An error occurred. Please send the text above.')
+        if path:
+            print('(같은 내용이 파일로도 저장되었습니다 / also saved to: %s)' % path)
+        print('=' * 64)
+        _wait_key()
+        raise SystemExit(1)
     finally:
         try:
-            game.profile.save()
-            game.session.leave()
+            if game is not None:
+                game.profile.save()
+                game.session.leave()
         except Exception:
             pass
 
