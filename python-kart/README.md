@@ -5,8 +5,8 @@
 
 | 파일 | 대상 | 렌더링 | 필요한 것 |
 |---|---|---|---|
-| `kart3d_phone.py` | 📱 **Pydroid 3** (안드로이드) — PC에서도 실행 가능 | pygame 으로 직접 만든 **소프트웨어 3D** (순수 파이썬) | `pygame` |
-| `kart3d_pc.py` | 💻 **컴퓨터(Windows/Mac/Linux)** | **Panda3D GPU 3D** (조명·안개·텍스처·하늘) | `panda3d` |
+| `kart3d_phone.py` | 📱 **Pydroid 3** (안드로이드) — PC에서도 실행 가능 | pygame 으로 직접 만든 **소프트웨어 3D** (순수 파이썬) | `pygame` (파이썬 3.14+ 는 `pygame-ce`) |
+| `kart3d_pc.py` | 💻 **컴퓨터(Windows/Mac/Linux)** | **Panda3D GPU 3D** (조명·안개·텍스처·하늘) | `panda3d` (파이썬 3.7~3.14) |
 
 ## 공통 기능
 - **맵 1,000개** : 번호(1~1000)마다 시드로 생성되는 고유 코스(길이 1.5~5 km, 커브, 오르내림, 뱅킹) + 10가지 테마
@@ -63,6 +63,9 @@ Panda3D 설치가 안 되는 환경이면 `kart3d_phone.py` 를 PC 에서 실행
 - **파일을 더블클릭하면 검은 창이 떴다가 바로 사라져요** → 오류를 볼 수 있게 이렇게 실행하세요.
   게임 파일이 있는 폴더를 연 뒤 **주소창에 `cmd` 입력 → Enter** → 검은 창에서 `python kart3d_pc.py` (안 되면 `py kart3d_pc.py`).
   (최신 버전은 오류가 나도 창이 바로 닫히지 않고, 오류 내용을 같은 폴더의 `kart3d_error.txt` 에도 저장합니다)
+- **`pygame` 설치가 `distutils`/`msvccompiler` 오류로 실패해요 (Python 3.14/3.15)** → 너무 새로운 파이썬이라 `pygame` 설치 파일이 없는 경우입니다.
+  `pip install pygame-ce` (같은 `import pygame` 으로 쓰는 호환 버전)로 해결됩니다. 최신 폰 버전 파일은 이걸 자동으로 시도합니다.
+  `panda3d` 는 파이썬 3.14 까지만 설치되므로, GPU 버전을 쓰려면 **Python 3.13** 을 설치하고 `py -3.13 -m pip install panda3d` → `py -3.13 kart3d_pc.py` 로 실행하세요.
 - **`panda3d`/`pygame` 이 필요하다고 나와요** → 위 설치 방법 참고. 게임이 올바른 설치 명령을 보여 주고, PC 에서는 **y** 로 자동 설치도 됩니다.
 - 폰에서는 `kart3d_pc.py` 가 아니라 **`kart3d_phone.py`** 를 실행하세요.
 
