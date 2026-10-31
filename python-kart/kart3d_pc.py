@@ -94,9 +94,16 @@ def _ensure_pkg(pkg, alt_hint='', candidates=None):
         print()
         print('설치에 실패했습니다.  /  Install failed.')
         if vi >= (3, 14):
+            script = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else 'kart3d.py'
+            qs = '"%s"' % script if (' ' in script or '(' in script) else script
             print('가장 흔한 원인: 파이썬 %s 은(는) 너무 새로워서 이 패키지의 설치 파일이 아직 없습니다.' % ver)
-            print('  -> Python 3.13 을 설치하세요 (https://www.python.org/downloads/ , 설치 화면에서 "Add python.exe to PATH" 체크)')
-            print('  -> 그 다음 새 명령 창에서:   py -3.13 -m pip install %s    그리고    py -3.13 %s' % (cands[0], os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else 'kart3d.py'))
+            print('  -> 해결: Python 3.13 을 추가로 설치하세요 (지금 파이썬은 그대로 둬도 됩니다). 새 명령 창에서 차례로:')
+            print('       py install 3.13')
+            print('       (위 명령이 안 되면 https://www.python.org/downloads/ 에서 3.13 설치, "Add python.exe to PATH" 체크)')
+            print('       py -3.13 -m pip install %s' % cands[0])
+            print('       py -3.13 %s' % qs)
+            if qs != script:
+                print('  (파일 이름에 공백/괄호가 있어서 따옴표로 감쌌습니다. 파일 이름을 kart3d.py 처럼 짧게 바꾸면 더 편해요)')
         else:
             print('위의 오류 문구를 그대로 알려주세요.  /  Please send the error text above.')
             print('(리눅스 "externally-managed-environment" 오류: python3 -m venv venv 로 가상환경을 만든 뒤 그 안에서 설치하세요)')

@@ -65,7 +65,9 @@ Panda3D 설치가 안 되는 환경이면 `kart3d_phone.py` 를 PC 에서 실행
   (최신 버전은 오류가 나도 창이 바로 닫히지 않고, 오류 내용을 같은 폴더의 `kart3d_error.txt` 에도 저장합니다)
 - **`pygame` 설치가 `distutils`/`msvccompiler` 오류로 실패해요 (Python 3.14/3.15)** → 너무 새로운 파이썬이라 `pygame` 설치 파일이 없는 경우입니다.
   `pip install pygame-ce` (같은 `import pygame` 으로 쓰는 호환 버전)로 해결됩니다. 최신 폰 버전 파일은 이걸 자동으로 시도합니다.
-  `panda3d` 는 파이썬 3.14 까지만 설치되므로, GPU 버전을 쓰려면 **Python 3.13** 을 설치하고 `py -3.13 -m pip install panda3d` → `py -3.13 kart3d_pc.py` 로 실행하세요.
+  `panda3d` 는 파이썬 3.14 까지만 설치되므로, GPU 버전을 쓰려면 **Python 3.13** 을 추가로 설치하세요 (지금 파이썬은 그대로 둬도 됩니다).
+  명령 창에서 `py install 3.13` (안 되면 python.org 에서 3.13 설치) → `py -3.13 -m pip install panda3d` → `py -3.13 kart3d_pc.py`.
+  (파일 이름에 공백/괄호가 있으면 `py -3.13 "kart3d_pc (2).py"` 처럼 따옴표로 감싸거나, 이름을 `kart3d_pc.py` 로 바꾸세요)
 - **`panda3d`/`pygame` 이 필요하다고 나와요** → 위 설치 방법 참고. 게임이 올바른 설치 명령을 보여 주고, PC 에서는 **y** 로 자동 설치도 됩니다.
 - 폰에서는 `kart3d_pc.py` 가 아니라 **`kart3d_phone.py`** 를 실행하세요.
 
