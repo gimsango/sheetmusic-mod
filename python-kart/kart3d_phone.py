@@ -935,6 +935,16 @@ class Track(object):
 #  아케이드 카트 물리 + AI
 # ----------------------------------------------------------------------------
 DRIFT_BOOST = (0.0, 0.7, 1.2, 1.9)
+STEER_RATES = ((4.5, 6.5), (7.0, 9.0), (11.0, 14.0))     # 조향 반응 설정별 (누를 때, 뗄 때) 속도
+
+
+def steer_step(cur, tgt, dt, resp=1):
+    """키보드/버튼 같은 켜고 끄는 입력을 부드럽게 -1..1 로 만든다. 반대 방향으로 급히 바꿀 때는 더 빠르게."""
+    up, down = STEER_RATES[int(clamp(resp, 0, 2))]
+    rate = down if tgt == 0 else up
+    if tgt * cur < 0:
+        rate = max(rate, down) * 1.3
+    return cur + (tgt - cur) * min(1.0, dt * rate)
 
 
 class KartSim(object):
@@ -2051,7 +2061,7 @@ def serve_forever(port=DEFAULT_PORT):
 # ----------------------------------------------------------------------------
 class Profile(dict):
     DEFAULTS = {'name': '', 'kart': None, 'map': 1, 'laps': 3, 'bots': 7, 'quality': 1, 'auto_gas': True, 'sound': True,
-                'lang': 'auto', 'last_ip': '', 'port': DEFAULT_PORT, 'steer_mode': 'buttons'}
+                'lang': 'auto', 'last_ip': '', 'port': DEFAULT_PORT, 'steer_mode': 'buttons', 'steer_resp': 1}
 
     def __init__(self, filename='kart3d_profile.json'):
         dict.__init__(self)
@@ -4032,6 +4042,7 @@ class App(object):
         self.mini = None
         self.keys = set()
         self.used_keyboard = False
+        self.used_gas_key = False
         self.steer = 0.0
         self.dirn = 1
         self.paused = False
@@ -4142,6 +4153,8 @@ class App(object):
                 self.keys.add(e.key)
                 if e.key in (pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_w, pygame.K_a, pygame.K_s, pygame.K_d, pygame.K_SPACE):
                     self.used_keyboard = True
+                if e.key in (pygame.K_UP, pygame.K_w):
+                    self.used_gas_key = True          # 가속 키를 눌러 본 뒤부터 '직접 가속' (조향 키만으로는 바뀌지 않음)
                 if e.key in (pygame.K_ESCAPE, getattr(pygame, 'K_AC_BACK', -999)):
                     self.on_back()
                 elif self.scene == 'race':
@@ -4186,18 +4199,21 @@ class App(object):
         if result == 'ok' and kb is not None:
             kb.on_ok(kb.text)
 
+    def touch_visible(self):
+        """화면 버튼은 터치 기기(또는 키보드를 아직 안 쓴 경우)에서만 보인다"""
+        return _is_android() or self.ptr.has_touch or not self.used_keyboard
+
     def read_input(self, dt):
         k = self.keys
-        pressed = self.touch.read(self.ptr.down())
+        pressed = self.touch.read(self.ptr.down()) if self.touch_visible() else set()
         left = pygame.K_LEFT in k or pygame.K_a in k or 'left' in pressed
         right = pygame.K_RIGHT in k or pygame.K_d in k or 'right' in pressed
         tgt = (1.0 if right else 0.0) - (1.0 if left else 0.0)
         brake = pygame.K_DOWN in k or pygame.K_s in k or 'brake' in pressed
         gas = pygame.K_UP in k or pygame.K_w in k or 'gas' in pressed
-        auto = self.profile['auto_gas'] and not self.used_keyboard
+        auto = self.profile['auto_gas'] and not self.used_gas_key
         drift = pygame.K_SPACE in k or pygame.K_LSHIFT in k or pygame.K_RSHIFT in k or 'drift' in pressed
-        rate = 7.0 if tgt == 0 else 5.5
-        self.steer += (tgt - self.steer) * min(1.0, dt * rate)
+        self.steer = steer_step(self.steer, tgt, dt, self.profile['steer_resp'])
         return {'steer': self.steer, 'throttle': 1.0 if (gas or (auto and not brake)) else 0.0, 'brake': 1.0 if brake else 0.0, 'drift': drift}, pressed
 
     # ------------------------------------------------------------------ 레이스
@@ -4221,6 +4237,8 @@ class App(object):
         self.steer = 0.0
         self.dirn = 1
         self.scene = 'race'
+        if not self.touch_visible() or not (_is_android() or self.ptr.has_touch):
+            self.toast(T('← → 조향   ↑ 가속   Space 드리프트   R 복귀', 'Left/Right steer   Up gas   Space drift   R reset'), 6.0, (255, 255, 255))
 
     def toggle_pause(self):
         if self.race is None:
@@ -4373,7 +4391,8 @@ class App(object):
         ui = self.ui
         u = ui.u
         draw_hud(self, self.screen, race, dt)
-        self.touch.draw(self.screen, ui, self.pressed)
+        if self.touch_visible():
+            self.touch.draw(self.screen, ui, self.pressed)
         pb = R(self.W // 2 - 22 * u, 8 * u, 44 * u, 40 * u)
         if ui.button(self.screen, pb, 'II', 'ghost', size=22 * u):
             self.toggle_pause()
@@ -4657,39 +4676,53 @@ class App(object):
         pw = min(self.W - 28 * u, 620 * u)
         r = R((self.W - pw) / 2, 14 * u, pw, self.H - 28 * u)
         ui.panel(surf, r, 215)
-        x, y, w = r.x + 18 * u, r.y + 14 * u, r.w - 36 * u
-        ui.text(surf, T('설정', 'Settings'), x, y, 34 * u)
-        y += 56 * u
-        ui.text(surf, T('그래픽 품질', 'Graphics'), x, y, 22 * u, (210, 220, 245))
-        y += 30 * u
-        qn = [T('낮음', 'Low'), T('중간', 'Medium'), T('높음', 'High')]
+        kk = clamp(r.h / (700.0 * u), 0.6, 1.0)          # 작은 화면에서는 세로 간격을 줄여 모두 들어가게
+        x, y, w = r.x + 18 * u, r.y + 12 * u, r.w - 36 * u
+        bh = 44 * u * kk
         cw = (w - 20 * u) / 3.0
-        for i in range(3):
-            if ui.button(surf, R(x + i * (cw + 10 * u), y, cw, 46 * u), qn[i], 'chipon' if self.renderer.q == i else 'chip'):
-                self.set_quality(i)
-                self.show_map = None
-        y += 62 * u
+        ui.text(surf, T('설정', 'Settings'), x, y, 32 * u * kk)
+        y += 50 * u * kk
+
+        def chips(label, names, cur, on_pick):
+            nonlocal y
+            ui.text(surf, label, x, y, 21 * u * kk, (210, 220, 245))
+            y += 27 * u * kk
+            for i, nm in enumerate(names):
+                if ui.button(surf, R(x + i * (cw + 10 * u), y, cw, bh), nm, 'chipon' if cur == i else 'chip', size=bh * 0.42):
+                    on_pick(i)
+            y += bh + 12 * u * kk
+
+        def pick_quality(i):
+            self.set_quality(i)
+            self.show_map = None
+
+        def pick_steer(i):
+            self.profile['steer_resp'] = i
+            self.profile.save()
+            self.toast(T('조향 반응을 바꿨어요', 'Steering changed'), 0.8)
+
+        def pick_lang(i):
+            global LANG
+            code = ('auto', 'ko', 'en')[i]
+            self.profile['lang'] = code
+            LANG = ('ko' if self.font_path else 'en') if code == 'auto' else code
+            self.profile.save()
+        chips(T('그래픽 품질', 'Graphics'), [T('낮음', 'Low'), T('중간', 'Medium'), T('높음', 'High')], self.renderer.q, pick_quality)
+        chips(T('조향 반응 (키보드/버튼)', 'Steering response (keys/buttons)'), [T('부드럽게', 'Smooth'), T('보통', 'Normal'), T('빠르게', 'Quick')], int(self.profile['steer_resp']), pick_steer)
         for key, lab in (('auto_gas', T('자동 가속 (터치)', 'Auto gas (touch)')), ('sound', T('소리', 'Sound'))):
             on = bool(self.profile[key])
-            if ui.button(surf, R(x, y, w, 46 * u), '%s :  %s' % (lab, 'ON' if on else 'OFF'), 'good' if on else 'normal'):
+            if ui.button(surf, R(x, y, w, bh), '%s :  %s' % (lab, 'ON' if on else 'OFF'), 'good' if on else 'normal', size=bh * 0.42):
                 self.profile[key] = not on
                 if key == 'sound':
                     self.sfx.enabled = not on
                 self.touch.layout(self.W, self.H, self.profile['auto_gas'])
                 self.profile.save()
-            y += 56 * u
-        ui.text(surf, T('언어 / Language', 'Language'), x, y, 22 * u, (210, 220, 245))
-        y += 30 * u
-        for i, (code, lab) in enumerate((('auto', 'Auto'), ('ko', '한국어' if self.font_path else 'Korean'), ('en', 'English'))):
-            cur = self.profile['lang']
-            if ui.button(surf, R(x + i * (cw + 10 * u), y, cw, 46 * u), lab, 'chipon' if cur == code else 'chip'):
-                self.profile['lang'] = code
-                LANG = ('ko' if self.font_path else 'en') if code == 'auto' else code
-                self.profile.save()
-        y += 62 * u
-        if ui.button(surf, R(x, y, w, 46 * u), 'FPS :  %s' % ('ON' if self.show_fps else 'OFF'), 'good' if self.show_fps else 'normal'):
+            y += bh + 10 * u * kk
+        cur_lang = ('auto', 'ko', 'en').index(self.profile['lang']) if self.profile['lang'] in ('auto', 'ko', 'en') else 0
+        chips(T('언어 / Language', 'Language'), ['Auto', '한국어' if self.font_path else 'Korean', 'English'], cur_lang, pick_lang)
+        if ui.button(surf, R(x, y, w, bh), 'FPS :  %s' % ('ON' if self.show_fps else 'OFF'), 'good' if self.show_fps else 'normal', size=bh * 0.42):
             self.show_fps = not self.show_fps
-        if ui.button(surf, R(x, r.bottom - 66 * u, w, 50 * u), T('완료', 'Done'), 'primary'):
+        if ui.button(surf, R(x, r.bottom - 12 * u - 50 * u * kk, w, 50 * u * kk), T('완료', 'Done'), 'primary', size=22 * u * kk):
             self.profile.save()
             self.go('menu')
 

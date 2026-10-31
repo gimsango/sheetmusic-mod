@@ -941,6 +941,16 @@ class Track(object):
 #  아케이드 카트 물리 + AI
 # ----------------------------------------------------------------------------
 DRIFT_BOOST = (0.0, 0.7, 1.2, 1.9)
+STEER_RATES = ((4.5, 6.5), (7.0, 9.0), (11.0, 14.0))     # 조향 반응 설정별 (누를 때, 뗄 때) 속도
+
+
+def steer_step(cur, tgt, dt, resp=1):
+    """키보드/버튼 같은 켜고 끄는 입력을 부드럽게 -1..1 로 만든다. 반대 방향으로 급히 바꿀 때는 더 빠르게."""
+    up, down = STEER_RATES[int(clamp(resp, 0, 2))]
+    rate = down if tgt == 0 else up
+    if tgt * cur < 0:
+        rate = max(rate, down) * 1.3
+    return cur + (tgt - cur) * min(1.0, dt * rate)
 
 
 class KartSim(object):
@@ -2057,7 +2067,7 @@ def serve_forever(port=DEFAULT_PORT):
 # ----------------------------------------------------------------------------
 class Profile(dict):
     DEFAULTS = {'name': '', 'kart': None, 'map': 1, 'laps': 3, 'bots': 7, 'quality': 1, 'auto_gas': True, 'sound': True,
-                'lang': 'auto', 'last_ip': '', 'port': DEFAULT_PORT, 'steer_mode': 'buttons'}
+                'lang': 'auto', 'last_ip': '', 'port': DEFAULT_PORT, 'steer_mode': 'buttons', 'steer_resp': 1}
 
     def __init__(self, filename='kart3d_profile.json'):
         dict.__init__(self)
@@ -4444,8 +4454,15 @@ class Game(ShowBase):
         def fps():
             self.show_fps = not self.show_fps
             self.build_settings()
+
+        def steer_resp():
+            self.profile['steer_resp'] = (int(self.profile['steer_resp']) + 1) % 3
+            self.profile.save()
+            self.build_settings()
+        sn = [T('부드럽게', 'Smooth'), T('보통', 'Normal'), T('빠르게', 'Quick')]
         rows = [self.R('%s: %s' % (T('언어 / Language', 'Language'), self.profile['lang']), lang, id='lang'),
                 self.R('%s: %s' % (T('소리', 'Sound'), 'ON' if self.profile['sound'] else 'OFF'), snd, id='snd'),
+                self.R('%s: %s' % (T('조향 반응', 'Steering'), sn[int(self.profile['steer_resp']) % 3]), steer_resp, id='steer'),
                 self.R('FPS: %s' % ('ON' if self.show_fps else 'OFF'), fps, id='fps'),
                 self.R(T('완료', 'Done'), lambda: self.back(), id='done')]
         self.menu.set(T('설정', 'Settings'), rows, '', T('Enter 로 값 변경', 'Enter to change'))
@@ -4583,6 +4600,7 @@ class Game(ShowBase):
         self.audio.silence()
         self.scene = 'race'
         self.loading_done()
+        self.hud.say(T('↑ 가속   ← → 조향   Space 드리프트   R 복귀', 'Up gas   Left/Right steer   Space drift   R reset'), 6.0, False, (1, 1, 1, 1))
 
     def toggle_pause(self):
         if self.race is None or self.scene == 'results':
@@ -4629,8 +4647,7 @@ class Game(ShowBase):
                 drift = drift or pad.findButton(GamepadButton.face_a()).pressed or pad.findButton(GamepadButton.rshoulder()).pressed
             except Exception:
                 pass
-        rate = 7.0 if tgt == 0 else 5.5
-        self.steer += (tgt - self.steer) * min(1.0, dt * rate)
+        self.steer = steer_step(self.steer, tgt, dt, self.profile['steer_resp'])
         return {'steer': self.steer, 'throttle': thr, 'brake': brk, 'drift': drift}
 
     def handle_events(self, race):
@@ -4742,7 +4759,7 @@ class Game(ShowBase):
         self.camera.setPos(*pos)
         self.camera.lookAt(Point3(pos[0] + d[0] * 20, pos[1] + d[1] * 20, pos[2] + d[2] * 20), Vec3(0, 0, 1))
         ratio = loc.speed / sim.stats['max_speed']
-        self.camLens.setFov(84 + clamp(ratio, 0, 1.2) * 14 + (10 if loc.boosting else 0))
+        self.camLens.setFov(82 + clamp(ratio, 0, 1.2) * 8 + (6 if loc.boosting else 0))
         self.world.update(pos)
         if self.particles is not None:
             self.particles.update(dt if not self.paused else 0.0)

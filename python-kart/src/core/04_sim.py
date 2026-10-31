@@ -3,6 +3,16 @@
 #  아케이드 카트 물리 + AI
 # ----------------------------------------------------------------------------
 DRIFT_BOOST = (0.0, 0.7, 1.2, 1.9)
+STEER_RATES = ((4.5, 6.5), (7.0, 9.0), (11.0, 14.0))     # 조향 반응 설정별 (누를 때, 뗄 때) 속도
+
+
+def steer_step(cur, tgt, dt, resp=1):
+    """키보드/버튼 같은 켜고 끄는 입력을 부드럽게 -1..1 로 만든다. 반대 방향으로 급히 바꿀 때는 더 빠르게."""
+    up, down = STEER_RATES[int(clamp(resp, 0, 2))]
+    rate = down if tgt == 0 else up
+    if tgt * cur < 0:
+        rate = max(rate, down) * 1.3
+    return cur + (tgt - cur) * min(1.0, dt * rate)
 
 
 class KartSim(object):
