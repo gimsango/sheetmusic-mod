@@ -22,13 +22,46 @@ import math
 import time
 import json
 import array
+import subprocess
 import random as _random
+
+
+def _ensure_pkg(pkg, alt_hint=''):
+    """필요한 패키지가 없을 때: 올바른 설치 명령을 보여주고, 동의하면 같은 파이썬으로 설치한 뒤 게임을 다시 시작한다."""
+    exe = sys.executable or 'python'
+    is_android = ('ANDROID_ARGUMENT' in os.environ) or ('ANDROID_ROOT' in os.environ and os.path.exists('/system/build.prop'))
+    print('=' * 64)
+    print('%s 패키지가 필요합니다  /  "%s" is required.' % (pkg, pkg))
+    if is_android:
+        print('Pydroid 3:  왼쪽 위 메뉴(=) > Pip > "%s" 검색 > INSTALL  (설치 후 다시 실행)' % pkg)
+        if alt_hint:
+            print(alt_hint)
+        print('=' * 64)
+        return
+    print('이 게임을 실행하는 파이썬에 설치하는 명령 (그대로 복사해서 실행):')
+    print()
+    print('    "%s" -m pip install %s' % (exe, pkg))
+    print()
+    if alt_hint:
+        print(alt_hint)
+    try:
+        ans = input('지금 자동으로 설치할까요? / Install now? (y/n) [y]: ').strip().lower()
+    except Exception:
+        ans = 'n'
+    if ans in ('', 'y', 'yes', 'ㅛ', '네', '예', 'ㅇ'):
+        rc = subprocess.call([exe, '-m', 'pip', 'install', pkg])
+        if rc == 0:
+            print('설치 완료! 게임을 다시 시작합니다...  /  Installed. Restarting...')
+            raise SystemExit(subprocess.call([exe] + sys.argv))
+        print()
+        print('설치에 실패했습니다. 위의 오류 문구를 그대로 알려주세요.  /  Install failed. Please send the error text above.')
+        print('(리눅스 "externally-managed-environment" 오류: python3 -m venv venv 로 가상환경을 만든 뒤 그 안에서 설치하세요)')
+    print('=' * 64)
 
 try:
     import pygame
 except ImportError:
-    print('pygame 이 필요합니다 / pygame is required.')
-    print('Pydroid 3: Menu > Pip > install "pygame"      PC: pip install pygame')
+    _ensure_pkg('pygame')
     raise SystemExit(1)
 
 # -*- coding: utf-8 -*-
