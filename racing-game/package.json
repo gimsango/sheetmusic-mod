@@ -1,0 +1,14 @@
+{
+  "name": "turbo-kart-3d",
+  "version": "1.0.0",
+  "description": "3D 레이싱 게임 - 1000개 맵, 100000개 카트, WiFi(LAN) 멀티플레이",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "three": "0.160.0",
+    "ws": "^8.18.0"
+  }
+}

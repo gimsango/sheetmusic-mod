@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#0b0f1a">
+<title>터보 카트 3D</title>
+<link rel="stylesheet" href="style.css">
+<script type="importmap">
+{ "imports": { "three": "/vendor/three/build/three.module.js", "three/addons/": "/vendor/three/examples/jsm/" } }
+</script>
+</head>
+<body>
+<canvas id="c"></canvas>
+
+<!-- 메인 메뉴 -->
+<div id="scMain" class="screen">
+  <div class="logo">TURBO KART <small>3D</small></div>
+  <div class="tag">맵 <b>1,000</b>개 · 카트 <b>100,000</b>종 · WiFi 멀티플레이</div>
+  <div class="menu">
+    <button class="big" data-go="solo">🏁 솔로 레이스</button>
+    <button class="big" data-go="multi">📡 WiFi 멀티플레이</button>
+    <button class="big alt" data-go="garage">🔧 차고 (카트 꾸미기)</button>
+    <button class="big alt" data-go="help">🎮 조작법</button>
+  </div>
+  <div class="foot" id="kartLabel"></div>
+</div>
+
+<!-- 솔로 설정 -->
+<div id="scSolo" class="screen panelwrap">
+  <div class="panel">
+    <h2>솔로 레이스</h2>
+    <div id="soloMap"></div>
+    <div class="row"><label>바퀴 수</label><div class="stepper"><button data-step="soloLaps:-1">−</button><span id="soloLaps">3</span><button data-step="soloLaps:1">+</button></div></div>
+    <div class="row"><label>AI 상대</label><div class="stepper"><button data-step="soloBots:-1">−</button><span id="soloBots">7</span><button data-step="soloBots:1">+</button></div></div>
+    <div class="actions"><button class="ghost" data-go="main">뒤로</button><button class="primary" id="soloStart">출발!</button></div>
+  </div>
+</div>
+
+<!-- 차고 -->
+<div id="scGarage" class="screen garage">
+  <div class="panel side">
+    <h2>차고</h2>
+    <div class="row"><label>닉네임</label><input id="nameInput" maxlength="14" placeholder="레이서"></div>
+    <div class="part"><label>차체</label><button data-part="body:-1">◀</button><span id="pBody"></span><button data-part="body:1">▶</button></div>
+    <div class="part"><label>페인트</label><button data-part="paint:-1">◀</button><span id="pPaint"></span><button data-part="paint:1">▶</button></div>
+    <div class="part"><label>휠</label><button data-part="wheel:-1">◀</button><span id="pWheel"></span><button data-part="wheel:1">▶</button></div>
+    <div class="part"><label>윙/파츠</label><button data-part="wing:-1">◀</button><span id="pWing"></span><button data-part="wing:1">▶</button></div>
+    <div class="row"><label>카트 번호</label><input id="kartNum" type="number" min="1" max="100000"><button id="rndKart" class="mini">🎲</button></div>
+    <div class="stats" id="stats"></div>
+    <div class="actions"><button class="primary" data-go="main">저장하고 돌아가기</button></div>
+  </div>
+</div>
+
+<!-- 멀티플레이 입장 -->
+<div id="scMulti" class="screen panelwrap">
+  <div class="panel">
+    <h2>WiFi 멀티플레이</h2>
+    <p class="hint">같은 WiFi에 연결된 친구들이 서버 PC 주소로 접속하면 함께 달릴 수 있어요.<br>한 명이 방을 만들고, 나머지는 4자리 방 코드를 입력하세요.</p>
+    <div class="actions col"><button class="primary" id="mkRoom">방 만들기</button>
+      <div class="row"><input id="joinCode" maxlength="4" placeholder="방 코드" style="text-transform:uppercase"><button id="joinRoom" class="primary">입장</button></div></div>
+    <div id="multiErr" class="err"></div>
+    <div class="actions"><button class="ghost" data-go="main">뒤로</button></div>
+  </div>
+</div>
+
+<!-- 로비 -->
+<div id="scLobby" class="screen panelwrap">
+  <div class="panel wide">
+    <h2>로비 <span id="roomCode" class="code"></span></h2>
+    <div class="hint" id="lanInfo"></div>
+    <div class="cols">
+      <div><h3>플레이어</h3><ul id="plist" class="plist"></ul></div>
+      <div id="lobbySettings">
+        <h3>레이스 설정</h3>
+        <div id="lobbyMap"></div>
+        <div class="row"><label>바퀴 수</label><div class="stepper"><button data-step="lobLaps:-1">−</button><span id="lobLaps">3</span><button data-step="lobLaps:1">+</button></div></div>
+        <div class="row"><label>AI 봇</label><div class="stepper"><button data-step="lobBots:-1">−</button><span id="lobBots">0</span><button data-step="lobBots:1">+</button></div></div>
+      </div>
+    </div>
+    <div class="actions"><button class="ghost" id="leaveRoom">나가기</button><button class="primary" id="startMulti">레이스 시작</button><span id="waitHost" class="hint"></span></div>
+  </div>
+</div>
+
+<div id="scHelp" class="screen panelwrap">
+  <div class="panel">
+    <h2>조작법</h2>
+    <table class="keys">
+      <tr><td>↑ / W</td><td>가속</td></tr><tr><td>↓ / S</td><td>브레이크 / 후진</td></tr>
+      <tr><td>← → / A D</td><td>조향</td></tr><tr><td>Space / Shift</td><td>드리프트 (코너에서 누른 채 유지, 떼면 미니 터보)</td></tr>
+      <tr><td>R</td><td>트랙 위로 복귀</td></tr><tr><td>M / Q</td><td>소리 끄기 / 그래픽 품질</td></tr><tr><td>Esc</td><td>일시정지 / 나가기</td></tr>
+    </table>
+    <p class="hint">모바일은 화면의 버튼을 사용하세요. 파란색 화살표 패드를 밟으면 부스트!<br>드리프트 불꽃 색: 파랑 → 주황 → 보라 (보라가 가장 강한 부스트)</p>
+    <div class="actions"><button class="primary" data-go="main">확인</button></div>
+  </div>
+</div>
+
+<!-- HUD -->
+<div id="hud" class="hidden">
+  <div id="hudPos"><b id="posN">1</b><small>/<span id="posT">8</span></small></div>
+  <div id="hudLap">LAP <b id="lapN">1</b>/<span id="lapT">3</span></div>
+  <div id="hudTime">0:00.00</div>
+  <div id="hudMap"><canvas id="mini" width="200" height="200"></canvas><div id="mapName"></div></div>
+  <div id="hudSpeed"><b id="spd">0</b><small>km/h</small><div class="bar"><i id="boostBar"></i></div><div class="bar drift"><i id="driftBar"></i></div></div>
+  <div id="board"></div>
+  <div id="bigMsg"></div>
+  <div id="toast"></div>
+  <div id="wrong" class="hidden">⚠ 역주행!</div>
+  <div id="touch" class="hidden">
+    <div class="tl"><button data-k="left">◀</button><button data-k="right">▶</button></div>
+    <div class="tr"><button data-k="drift">DRIFT</button><button data-k="brake">⏷</button><button data-k="gas" class="gas">GAS</button></div>
+  </div>
+  <button id="pauseBtn" class="mini">☰</button>
+</div>
+
+<div id="results" class="screen panelwrap hidden">
+  <div class="panel wide"><h2>🏆 결과</h2><ol id="resList" class="reslist"></ol>
+    <div class="actions"><button class="ghost" id="resMenu">메뉴로</button><button class="primary" id="resAgain">다시 달리기</button></div></div>
+</div>
+<div id="pause" class="screen panelwrap hidden">
+  <div class="panel"><h2>일시정지</h2><div class="actions col"><button class="primary" id="pResume">계속하기</button><button class="ghost" id="pRestart">다시 시작</button><button class="ghost" id="pQuit">나가기</button></div></div>
+</div>
+<div id="loading" class="hidden"><div class="spin"></div><div id="loadTxt">맵 생성 중…</div></div>
+
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
