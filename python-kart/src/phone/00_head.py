@@ -58,14 +58,95 @@ def _crash_log(text):
     return None
 
 
-def _ensure_pkg(pkg, alt_hint='', candidates=None):
+def _other_pythons():
+    """설치된 다른 파이썬(3.10~3.14) 찾기 -> [(버전, 경로), ...] (선호 순서). 윈도우 'py' 런처와 PATH 를 이용."""
+    import re
+    import shutil
+    pref = ['3.13', '3.12', '3.14', '3.11', '3.10']
+    cur = os.path.normcase(os.path.abspath(sys.executable or ''))
+    cands = []
+
+    def add(p):
+        try:
+            p = os.path.abspath(p)
+            if os.path.isfile(p) and os.path.normcase(p) != cur and p not in cands:
+                cands.append(p)
+        except Exception:
+            pass
+
+    def run(cmd):
+        return subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True, timeout=25)
+    try:
+        r = run(['py', '-0p'])
+        for m in re.finditer(r'[A-Za-z]:\\[^\r\n"]*?python\.exe', r.stdout or '', re.I):
+            add(m.group(0))
+    except Exception:
+        pass
+    for v in pref:
+        w = shutil.which('python' + v)
+        if w:
+            add(w)
+    if not cands:
+        for v in pref:
+            try:
+                r = run(['py', '-' + v, '-c', 'import sys;print(sys.executable)'])
+                if r.returncode == 0 and r.stdout.strip():
+                    add(r.stdout.strip().splitlines()[-1])
+            except Exception:
+                pass
+    out = []
+    for p in cands:
+        try:
+            r = run([p, '-c', 'import sys;print("%d.%d" % sys.version_info[:2])'])
+            v = r.stdout.strip()
+            if r.returncode == 0 and v in pref:
+                out.append((pref.index(v), v, p))
+        except Exception:
+            pass
+    out.sort()
+    return [(v, p) for _, v, p in out]
+
+
+def _relaunch_with_other_python(imp, cands, install):
+    """다른 파이썬이 이미 해당 패키지를 갖고 있으면(또는 install=True 면 설치해서) 그 파이썬으로 게임을 다시 시작한다."""
+    if os.environ.get('KART3D_RELAUNCHED'):
+        return False                      # 이미 한 번 재시작했으면 무한 반복 방지
+    for v, exe2 in _other_pythons():
+        ok = subprocess.call([exe2, '-c', 'import ' + imp], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) == 0
+        if not ok and install:
+            for c in cands:
+                print('>> Python %s 에 설치 시도 / installing into Python %s: %s' % (v, v, c))
+                if subprocess.call([exe2, '-m', 'pip', 'install', '--only-binary=:all:', c]) == 0:
+                    ok = True
+                    break
+        if ok:
+            print('>> Python %s 로 게임을 시작합니다...  /  Restarting with Python %s' % (v, v))
+            os.environ['KART3D_RELAUNCHED'] = '1'
+            raise SystemExit(subprocess.call([exe2] + sys.argv))
+    return False
+
+
+def _ensure_pkg(pkg, alt_hint='', candidates=None, err=None):
     """필요한 패키지가 없을 때: 올바른 설치 명령을 보여주고, 동의하면 같은 파이썬으로 설치(미리 빌드된 것만)한 뒤 게임을 다시 시작한다."""
     exe = sys.executable or 'python'
     vi = sys.version_info
     ver = '%d.%d' % (vi[0], vi[1])
     cands = list(candidates or [pkg])
+    imp = 'pygame' if pkg.startswith('pygame') else pkg
+    if not _is_android():
+        try:
+            _relaunch_with_other_python(imp, cands, False)      # 다른 파이썬에 이미 설치돼 있으면 조용히 그걸로 실행
+        except OSError:
+            pass
     print('=' * 64)
     print('%s 패키지가 필요합니다  /  "%s" is required.   (Python %s)' % (pkg, pkg, ver))
+    if err:
+        print('(불러오기 오류 / import error: %s)' % err)
+    if os.environ.get('KART3D_RELAUNCHED'):
+        print('이미 한 번 설치/재시작을 했는데도 불러오지 못했습니다. 위의 오류 문구를 알려주세요.  /  Already retried once; please send the error text above.')
+        print('=' * 64)
+        _wait_key()
+        return
     if _is_android():
         print('Pydroid 3:  왼쪽 위 메뉴(=) > Pip > "%s" 검색 > INSTALL  (설치 후 다시 실행)' % cands[0])
         if alt_hint:
@@ -88,8 +169,15 @@ def _ensure_pkg(pkg, alt_hint='', candidates=None):
             rc = subprocess.call([exe, '-m', 'pip', 'install', '--only-binary=:all:', c])
             if rc == 0:
                 print('설치 완료! 게임을 다시 시작합니다...  /  Installed. Restarting...')
+                os.environ['KART3D_RELAUNCHED'] = '1'
                 raise SystemExit(subprocess.call([exe] + sys.argv))
         print()
+        print('이 파이썬(%s)에는 설치할 수 없었습니다.  /  Could not install into this Python.' % ver)
+        print('>> 설치된 다른 파이썬을 찾는 중...  /  Looking for another Python...')
+        try:
+            _relaunch_with_other_python(imp, cands, True)
+        except OSError:
+            pass
         print('설치에 실패했습니다.  /  Install failed.')
         if vi >= (3, 14):
             script = os.path.basename(sys.argv[0]) if sys.argv and sys.argv[0] else 'kart3d.py'
@@ -110,9 +198,9 @@ def _ensure_pkg(pkg, alt_hint='', candidates=None):
 
 try:
     import pygame
-except ImportError:
+except ImportError as _e:
     # 3.14+ 는 pygame 설치 파일이 없어서 호환 버전(pygame-ce)을 먼저 시도
-    _ensure_pkg('pygame', candidates=(['pygame-ce', 'pygame'] if sys.version_info >= (3, 14) else ['pygame', 'pygame-ce']))
+    _ensure_pkg('pygame', candidates=(['pygame-ce', 'pygame'] if sys.version_info >= (3, 14) else ['pygame', 'pygame-ce']), err=str(_e))
     raise SystemExit(1)
 
 # @CORE@
