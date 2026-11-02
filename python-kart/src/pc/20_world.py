@@ -197,7 +197,7 @@ class World(object):
                 z = 380 + self.rnd() * 420
                 s = 70 + self.rnd() * 110
                 for j in range(4):
-                    m.sphere((math.cos(a) * d + (j - 1.5) * s * 0.9, math.sin(a) * d, z + (j % 2) * 8), s * 0.55, (1, 1, 1, 0.88) if th['key'] != 'candy' else (1, 0.94, 0.98, 0.88),
+                    m.sphere((math.cos(a) * d + (j - 1.5) * s * 0.9, math.sin(a) * d, z + (j % 2) * 8), s * 0.55, rgbf(th.get('cloud') or (255, 255, 255), 1.0, 0.88),
                              seg=8, rings=4, scale=(1.0, 0.7, 0.34))
             cl = m.attach(self.sky, 'clouds')
             cl.setTransparency(TransparencyAttrib.MAlpha)
@@ -205,101 +205,108 @@ class World(object):
             cl.setFogOff()
             cl.setDepthWrite(False)
             cl.setBin('background', 4)
+        if th.get('aurora'):
+            self._aurora()
         self._horizon()
 
-    def _horizon(self):
-        """360도 먼 산/도시 실루엣 (안개색과 섞어 원근감)"""
-        th = self.th
-        key = th['key']
-        fog = hex_rgb(th['fog'])
-        skyb = hex_rgb(th['sky_bot'])
-        rnd = Rng(self.track.info['seed'] ^ 0x77)
+    def _aurora(self):
+        """오로라: 하늘에 반투명 띠 3줄"""
         m = Mesh()
-        R = 2500.0
+        for band, col in enumerate(((0.3, 1.0, 0.68, 0.5), (0.36, 0.82, 1.0, 0.4), (0.75, 0.48, 1.0, 0.32))):
+            ph, z0 = self.rnd() * TAU, 560 + band * 210
+            seg = 90
+            prev = None
+            for i in range(seg + 1):
+                a = TAU * i / seg
+                r = 2800.0
+                zz = z0 + math.sin(a * 3 + ph) * 90 + math.sin(a * 7 + ph * 2) * 35
+                th_ = 230 + 80 * math.sin(a * 5 + ph)
+                lo = m.add((math.cos(a) * r, math.sin(a) * r, zz), (-math.cos(a), -math.sin(a), 0), (col[0], col[1], col[2], col[3]))
+                hi = m.add((math.cos(a) * r, math.sin(a) * r, zz + th_), (-math.cos(a), -math.sin(a), 0), (col[0], col[1], col[2], 0.0))
+                if prev is not None:
+                    m.tri(prev[0], lo, hi)
+                    m.tri(prev[0], hi, prev[1])
+                prev = (lo, hi)
+        au = m.attach(self.sky, 'aurora')
+        au.setTwoSided(True)
+        au.setLightOff()
+        au.setFogOff()
+        au.setTransparency(TransparencyAttrib.MAlpha)
+        au.setDepthWrite(False)
+        au.setDepthTest(False)
+        au.setBin('background', 1)
 
-        def ridge(color, base, amp, harm=(1, 2, 3, 5, 8, 13), z0=-300.0, rad=R, snow=False):
-            phs = [rnd() * TAU for _ in harm]
-            segs = 200
-            ang = [TAU * i / segs for i in range(segs + 1)]
-            hs = []
-            for a in ang:
-                h = base
-                for k, p in zip(harm, phs):
-                    h += amp / (k ** 0.8) * math.sin(k * a + p)
-                hs.append(max(10.0, h))
-            low = []
-            hi = []
-            for i, a in enumerate(ang):
-                ca, sa = math.cos(a) * rad, math.sin(a) * rad
-                n = (-math.cos(a), -math.sin(a), 0.2)
-                low.append(m.add((ca, sa, z0), n, rgbf(color, 0.82)))
-                topc = rgbf(color, 1.12) if not snow else (0.96, 0.98, 1.0, 1.0)
-                hi.append(m.add((ca, sa, hs[i]), n, topc))
-            for i in range(segs):
-                a, b, c, d = low[i], low[i + 1], hi[i + 1], hi[i]
-                m.tri(a, b, c)
-                m.tri(a, c, d)
+    def _horizon(self):
+        """360도 지평선: 코어 horizon_layers 정의를 원통면에 그린다 (배경 칸에서 순서대로 -> 겹침 깜빡임 없음)"""
+        th = self.th
+        m = Mesh()
 
-        if key in ('forest', 'autumn'):
-            c1 = (110, 140, 170) if key == 'forest' else (190, 150, 110)
-            ridge(mix_rgb(c1, skyb, 0.5), 260, 150, rad=2600)
-            c2 = (60, 110, 80) if key == 'forest' else (150, 95, 50)
-            ridge(mix_rgb(c2, fog, 0.35), 150, 90, rad=2100)
-        elif key == 'desert':
-            ridge(mix_rgb((200, 160, 100), skyb, 0.5), 130, 70, (1, 2, 3, 4), rad=2500)
-            for _ in range(3):
-                a = rnd() * TAU
-                b = 130 + rnd() * 90
-                cx, cy = math.cos(a) * 2300, math.sin(a) * 2300
-                m.frustum((cx, cy, b * 0.45), b, 0.0, b * 0.9, rgbf(mix_rgb((190, 150, 95), fog, 0.35)), 'z', 4, False)
-            ridge(mix_rgb((214, 176, 110), fog, 0.2), 70, 45, (1, 2, 4, 6), rad=1900)
-        elif key == 'snow':
-            ridge((246, 250, 255), 330, 170, rad=2600, snow=True)
-            ridge(mix_rgb((95, 125, 105), fog, 0.45), 120, 60, rad=2000)
-        elif key == 'neon':
-            for layer, (col, hmax, rad) in enumerate((((78, 40, 130), 520, 2500), ((30, 18, 66), 330, 2000))):
-                n = 150
-                for i in range(n):
-                    a = TAU * i / n + rnd() * 0.02
-                    w = 30 + rnd() * 55
-                    h = 40 + rnd() * hmax
-                    cx, cy = math.cos(a) * rad, math.sin(a) * rad
-                    m.box((cx, cy, h / 2 - 50), (w / 2, w / 2, h / 2 + 25), rgbf(col))
-                    if rnd() < 0.45:
-                        gc = [(255, 43, 214), (25, 230, 255), (255, 225, 74)][int(rnd() * 3)]
-                        m.box((cx, cy, h * (0.3 + 0.6 * rnd()) - 50), (w * 0.52, w * 0.52, 3), rgbf(gc, 1.6))
-        elif key == 'volcano':
-            ridge((46, 22, 18), 160, 90, rad=2400)
-            for _ in range(2):
-                a = rnd() * TAU
-                b = 360 + rnd() * 180
-                cx, cy = math.cos(a) * 2200, math.sin(a) * 2200
-                m.frustum((cx, cy, b * 0.55), b, 40, b * 1.1, rgbf((52, 26, 20)), 'z', 9, False, rgbf((255, 120, 40), 1.5))
-        elif key == 'tropic':
-            ridge(mix_rgb((70, 150, 100), fog, 0.35), 60, 40, (1, 3, 5, 9), rad=2300)
-            ridge(mix_rgb((235, 215, 160), fog, 0.2), 25, 15, (1, 3, 5), rad=1700)
-        elif key == 'candy':
-            ridge(mix_rgb((255, 190, 225), skyb, 0.35), 200, 120, rad=2500)
-            ridge(mix_rgb((190, 240, 255), fog, 0.3), 110, 70, rad=2000)
-        elif key == 'space':
-            ridge((70, 70, 80), 150, 80, rad=2400)
-            a = rnd() * TAU
-            m.sphere((math.cos(a) * 2600, math.sin(a) * 2600, 900), 380, rgbf((58, 111, 208)), seg=18, rings=12)
-            ridge((92, 92, 104), 80, 50, (1, 2, 4, 7), rad=1900)
-        elif key == 'canyon':
-            for layer, (col, hmax, rad) in enumerate((((150, 70, 50), 520, 2500), ((120, 52, 36), 330, 1900))):
-                n = 40
-                for i in range(n):
-                    a = TAU * i / n + rnd() * 0.05
-                    w = 120 + rnd() * 260
-                    h = hmax * (0.35 + rnd() * 0.65)
-                    cx, cy = math.cos(a) * rad, math.sin(a) * rad
-                    cc = mix_rgb(col, fog, 0.3 - layer * 0.15)
-                    m.box((cx, cy, h / 2 - 60), (w / 2, w / 3, h / 2 + 30), rgbf(cc))
+        def P(rad, a, h):
+            t = a * TAU
+            return (math.cos(t) * rad, math.sin(t) * rad, h)
+
+        def N(a):
+            t = a * TAU
+            return (-math.cos(t), -math.sin(t), 0.2)
+
+        def fan(rad, col, pts):
+            c = rgbf(col)
+            ca = sum(q[0] for q in pts) / len(pts)
+            cz = sum(q[1] for q in pts) / len(pts)
+            ctr = m.add(P(rad, ca, cz), N(ca), c)
+            idx = [m.add(P(rad, a, h), N(a), c) for a, h in pts]
+            for i in range(len(idx)):
+                m.tri(ctr, idx[i], idx[(i + 1) % len(idx)])
+        for rad, items in horizon_layers(th, self.track.info['seed']):
+            for it in items:
+                t = it[0]
+                if t == 'ridge':
+                    col, top, hs = it[1], it[2], it[3]
+                    n = len(hs) - 1
+                    rows = []
+                    for i in range(n + 1):
+                        a = i / float(n)
+                        if top:
+                            rows.append((m.add(P(rad, a, -300.0), N(a), rgbf(col, 0.82)), m.add(P(rad, a, hs[i] * 0.72), N(a), rgbf(col, 1.05)),
+                                         m.add(P(rad, a, hs[i]), N(a), rgbf(top))))
+                        else:
+                            rows.append((m.add(P(rad, a, -300.0), N(a), rgbf(col, 0.82)), m.add(P(rad, a, hs[i]), N(a), rgbf(col, 1.12))))
+                    for i in range(n):
+                        r0, r1 = rows[i], rows[i + 1]
+                        for k in range(len(r0) - 1):
+                            m.tri(r0[k], r1[k], r1[k + 1])
+                            m.tri(r0[k], r1[k + 1], r0[k + 1])
+                elif t == 'poly':
+                    fan(rad, it[1], it[2])
+                elif t == 'disc':
+                    col, a, h, r = it[1], it[2], it[3], it[4]
+                    fan(rad, col, [(a + r * math.cos(TAU * k / 18) / (TAU * rad), h + r * math.sin(TAU * k / 18)) for k in range(18)])
+                elif t == 'ring':
+                    col, a, h, rx, ry, w = it[1], it[2], it[3], it[4], it[5], it[6]
+                    c = rgbf(col)
+                    seg = 40
+                    outer = [m.add(P(rad, a + rx * math.cos(TAU * k / seg) / (TAU * rad), h + ry * math.sin(TAU * k / seg)), N(a), c) for k in range(seg)]
+                    inner = [m.add(P(rad, a + (rx - w) * math.cos(TAU * k / seg) / (TAU * rad), h + (ry - w) * math.sin(TAU * k / seg)), N(a), c) for k in range(seg)]
+                    for k in range(seg):
+                        k2 = (k + 1) % seg
+                        m.tri(outer[k], outer[k2], inner[k2])
+                        m.tri(outer[k], inner[k2], inner[k])
+                elif t == 'line':
+                    col, pts, w = it[1], it[2], it[3]
+                    c = rgbf(col, 1.3)
+                    for i in range(len(pts) - 1):
+                        (a0, h0), (a1, h1) = pts[i], pts[i + 1]
+                        q = [m.add(P(rad - 1.0, a0, h0 - w / 2), N(a0), c), m.add(P(rad - 1.0, a1, h1 - w / 2), N(a1), c),
+                             m.add(P(rad - 1.0, a1, h1 + w / 2), N(a1), c), m.add(P(rad - 1.0, a0, h0 + w / 2), N(a0), c)]
+                        m.tri(q[0], q[1], q[2])
+                        m.tri(q[0], q[2], q[3])
         hz = m.attach(self.sky, 'horizon')
         hz.setTwoSided(True)
         hz.setLightOff()
         hz.setFogOff()
+        hz.setDepthWrite(False)
+        hz.setDepthTest(False)
+        hz.setBin('background', 6)
 
     def _far_ground(self):
         tr = self.track
@@ -341,7 +348,8 @@ class World(object):
         tr = self.track
         N, hw = tr.N, tr.hw
         m = Mesh()
-        red, white = (0.85, 0.14, 0.16, 1.0), (0.94, 0.94, 0.94, 1.0)
+        kb = self.th.get('kerb') or ((216, 35, 42), (240, 240, 240))
+        red, white = rgbf(kb[0]), rgbf(kb[1])
         amb = 0.8 if self.night else 1.0
         for side in (-1, 1):
             for i in range(N):
@@ -476,86 +484,231 @@ class World(object):
 
     # ---- 장식물 -----------------------------------------------------------------------------
     def _proto(self, kind, var):
+        """장식물 원형 메시 (바이옴 팔레트로 색칠). 반환: (빛 받는 메시, 발광 메시|None)"""
         th = self.th
         m = Mesh()
-        glow = None
+        g = Mesh()
         rc = (hex_rgb(th['rock'][0]), hex_rgb(th['rock'][1]))
+        leaf = th.get('leaf') or [(47, 127, 53), (58, 140, 58), (74, 160, 74), (90, 170, 80)]
+        trunk = th.get('trunk') or (90, 59, 34)
+        acc = th.get('accent') or [(255, 43, 214), (25, 230, 255), (255, 225, 74), (120, 255, 150)]
+        flower = th.get('flower') or [(255, 224, 64), (255, 96, 128), (255, 255, 255), (176, 123, 255)]
+        night = self.night
         if kind == 'pine':
-            snowy = th.get('snowy')
-            m.frustum((0, 0, 1.5), 0.5, 0.35, 3.0, rgbf((90, 59, 34)), 'z', 6)
-            cols = [(31, 107, 53), (42, 125, 63), (53, 145, 74)] if not snowy else [(79, 127, 102), (109, 154, 132), (242, 247, 251)]
+            m.frustum((0, 0, 1.5), 0.5, 0.35, 3.0, rgbf(trunk), 'z', 6)
+            if th.get('snowy'):
+                cols = [mix_rgb(leaf[0], (240, 246, 252), 0.15), mix_rgb(leaf[1], (240, 246, 252), 0.35), (242, 247, 251)]
+            else:
+                cols = [leaf[0], leaf[1], leaf[2]]
             for (z, r, ln), c in zip(((5.0, 3.4, 5.0), (7.6, 2.7, 4.6), (10.0, 1.9, 4.0)), cols):
                 m.frustum((0, 0, z), r, 0.0, ln, rgbf(c), 'z', 7, True)
         elif kind == 'roundtree':
-            cols = [(217, 84, 30), (232, 163, 23), (184, 58, 26), (240, 192, 48)] if th.get('autumn') else [(58, 140, 58), (74, 160, 74), (47, 127, 53), (90, 170, 80)]
-            c = cols[var % 4]
-            m.frustum((0, 0, 2.0), 0.65, 0.45, 4.0, rgbf((90, 59, 34)), 'z', 6)
+            c = leaf[var % len(leaf)]
+            m.frustum((0, 0, 2.0), 0.65, 0.45, 4.0, rgbf(trunk), 'z', 6)
             m.sphere((0, 0, 6.5), 3.4, rgbf(c), 9, 6, (1, 1, 0.9))
             m.sphere((1.6, 0.8, 5.3), 2.2, rgbf(c, 0.88), 8, 5)
+            if th.get('snowy'):
+                m.sphere((0, 0, 8.6), 2.2, (0.94, 0.96, 0.99, 1), 8, 4, (1, 1, 0.45))
         elif kind == 'bush':
-            m.sphere((0, 0, 0.8), 1.6, rgbf((47, 127, 53)), 8, 5, (1.2, 1.1, 0.7))
-            m.sphere((1.3, 0.5, 0.5), 1.1, rgbf((58, 140, 58)), 7, 4)
+            m.sphere((0, 0, 0.8), 1.6, rgbf(leaf[0]), 8, 5, (1.2, 1.1, 0.7))
+            m.sphere((1.3, 0.5, 0.5), 1.1, rgbf(leaf[1]), 7, 4)
         elif kind == 'cactus':
-            g = rgbf((59, 138, 74))
-            m.frustum((0, 0, 3.0), 0.8, 0.7, 6.0, g, 'z', 8)
-            m.frustum((0.9, 0, 2.4), 0.4, 0.4, 1.4, g, 'x', 6)
-            m.frustum((1.7, 0, 3.5), 0.4, 0.4, 2.4, g, 'z', 6)
-            m.frustum((-0.6, 0, 3.6), 0.4, 0.4, 1.2, g, 'x', 6)
-            m.frustum((-1.3, 0, 4.4), 0.4, 0.4, 1.8, g, 'z', 6)
+            gc = rgbf(th.get('cactus') or (59, 138, 74))
+            m.frustum((0, 0, 3.0), 0.8, 0.7, 6.0, gc, 'z', 8)
+            m.frustum((0.9, 0, 2.4), 0.4, 0.4, 1.4, gc, 'x', 6)
+            m.frustum((1.7, 0, 3.5), 0.4, 0.4, 2.4, gc, 'z', 6)
+            m.frustum((-0.6, 0, 3.6), 0.4, 0.4, 1.2, gc, 'x', 6)
+            m.frustum((-1.3, 0, 4.4), 0.4, 0.4, 1.8, gc, 'z', 6)
         elif kind == 'rock':
             m.sphere((0, 0, 0.9), 2.2, rgbf(rc[0]), 7, 4, (1.3, 1.1, 0.8))
             m.sphere((2.3, 0.7, 0.5), 1.3, rgbf(rc[1]), 6, 4, (1.0, 1.0, 0.8))
         elif kind == 'mesa':
-            for (z, r0, r1, ln), c in zip(((6, 9, 7, 12), (15, 7, 6.2, 6), (20.5, 6.2, 5.4, 5), (23.6, 5.6, 5.6, 1.2)), ((176, 74, 40), (199, 101, 58), (168, 68, 36), (224, 160, 96))):
+            mc = th.get('mesa') or [(176, 74, 40), (199, 101, 58), (168, 68, 36), (224, 160, 96)]
+            for (z, r0, r1, ln), c in zip(((6, 9, 7, 12), (15, 7, 6.2, 6), (20.5, 6.2, 5.4, 5), (23.6, 5.6, 5.6, 1.2)), (mc[0], mc[1], mc[2], mc[3])):
                 m.frustum((0, 0, z), r0, r1, ln, rgbf(c), 'z', 7)
         elif kind == 'palm':
-            m.frustum((0.3, 0, 4.2), 0.5, 0.28, 8.4, rgbf((138, 106, 64)), 'z', 6)
+            m.frustum((0.3, 0, 4.2), 0.5, 0.28, 8.4, rgbf(mix_rgb(trunk, (200, 170, 110), 0.45)), 'z', 6)
             for k in range(7):
                 a = k * 0.898
-                blade(m, (0.3, 0, 8.4), (0.3 + math.cos(a) * 4.6, math.sin(a) * 4.6, 6.7), 0.75, rgbf((47, 143, 58) if k % 2 else (58, 160, 70)))
-            m.sphere((0.3, 0, 8.2), 0.45, rgbf((90, 59, 34)), 6, 4)
+                blade(m, (0.3, 0, 8.4), (0.3 + math.cos(a) * 4.6, math.sin(a) * 4.6, 6.7), 0.75, rgbf(leaf[k % len(leaf)]))
+            m.sphere((0.3, 0, 8.2), 0.45, rgbf(shade_rgb(trunk, 0.9)), 6, 4)
         elif kind == 'building':
             m.box((0, 0, 0.5), (0.5, 0.5, 0.5), rgbf((58, 56, 108)))
-            g = Mesh()
-            for z, c in ((0.9, (255, 43, 214)), (0.62, (25, 230, 255)), (0.34, (255, 225, 74)), (0.98, (255, 43, 214))):
+            for z, c in ((0.9, acc[0]), (0.62, acc[1 % len(acc)]), (0.34, acc[2 % len(acc)]), (0.98, acc[0])):
                 g.box((0, 0, z), (0.512, 0.512, 0.008), rgbf(c, 1.6))
-            glow = g
         elif kind == 'crystal':
-            col = (255, 122, 26) if th.get('lava') else ((25, 230, 255) if th['key'] == 'space' else (255, 43, 214))
-            g = Mesh()
+            col = th.get('crystal') or (255, 43, 214)
             g.octa((0, 0, 3.0), 1.2, rgbf(col, 1.5), (1, 1, 2.6))
             g.octa((1.6, 0.4, 1.8), 0.8, rgbf(col, 1.2), (1, 1, 2.2))
-            glow = g
         elif kind == 'lollipop':
-            hue = [(255, 90, 140), (90, 200, 255), (255, 200, 60), (160, 110, 255), (110, 230, 150), (255, 140, 60)][var % 6]
+            hue = acc[var % len(acc)]
             m.frustum((0, 0, 2.6), 0.16, 0.16, 5.2, rgbf((245, 245, 245)), 'z', 6)
             m.frustum((0, 0, 6.2), 2.2, 2.2, 0.6, rgbf((255, 255, 255)), 'y', 14)
             m.frustum((0, -0.31, 6.2), 1.2, 1.2, 0.05, rgbf(hue), 'y', 14)
             m.frustum((0, 0.31, 6.2), 1.2, 1.2, 0.05, rgbf(hue), 'y', 14)
         elif kind == 'icecream':
-            sc = [(255, 158, 196), (255, 235, 160), (150, 220, 255)][var % 3]
+            sc = mix_rgb(acc[(var + 1) % len(acc)], (255, 255, 255), 0.45)
             m.frustum((0, 0, 1.8), 0.0, 1.4, 3.6, rgbf((224, 169, 106)), 'z', 8)
             m.sphere((0, 0, 4.3), 1.7, rgbf(sc), 9, 6)
             m.sphere((0, 0, 6.1), 0.4, rgbf((221, 34, 51)), 6, 4)
-        return m, glow
+        elif kind == 'acacia':
+            c = leaf[var % len(leaf)]
+            m.frustum((0, 0, 2.3), 0.32, 0.22, 4.6, rgbf(trunk), 'z', 6)
+            m.frustum((-0.9, 0, 3.7), 0.14, 0.14, 2.0, rgbf(trunk), 'x', 5)
+            m.sphere((0.3, 0, 4.9), 4.2, rgbf(c), 10, 5, (1, 1, 0.22))
+            m.sphere((-1.4, 0.4, 4.2), 2.2, rgbf(c, 0.9), 8, 4, (1, 1, 0.26))
+            if var:
+                m.sphere((1.8, -0.6, 4.3), 1.8, rgbf(c, 1.08), 8, 4, (1, 1, 0.3))
+        elif kind == 'deadtree':
+            tc = rgbf(trunk)
+            m.frustum((0, 0, 3.0), 0.42, 0.14, 6.0, tc, 'z', 6)
+            sg = -1 if var else 1
+            for path in (((0, 0, 2.8), (sg * 1.2, 0.2, 4.2), (sg * 1.9, 0.1, 5.4)), ((0, 0, 3.8), (-sg * 1.3, 0.3, 4.9), (-sg * 1.7, 0.0, 6.0)),
+                         ((0, 0, 4.8), (0.3, sg * 1.1, 6.1), (0.5, sg * 1.3, 6.8))):
+                mesh_tube(m, list(path), 0.13, tc, 5)
+        elif kind == 'bamboo':
+            rnd = Rng(17)
+            for k in range(6):
+                x, y = (rnd() - 0.5) * 2.2, (rnd() - 0.5) * 2.2
+                h = 8.0 + rnd() * 4.5
+                c = rgbf(shade_rgb(trunk, 0.85 + 0.3 * rnd()))
+                m.frustum((x, y, h / 2), 0.12, 0.1, h, c, 'z', 6)
+                for z in range(2, int(h), 2):
+                    m.frustum((x, y, z), 0.15, 0.15, 0.1, rgbf(shade_rgb(trunk, 0.6)), 'z', 6, False)
+                m.sphere((x, y, h), 0.9, rgbf(leaf[k % len(leaf)]), 7, 4, (1.4, 1.0, 0.45))
+                m.sphere((x + 0.4, y, h - 2.2), 0.6, rgbf(leaf[(k + 1) % len(leaf)]), 6, 3, (1.4, 1.0, 0.45))
+        elif kind == 'mushroom':
+            cap = acc[var % len(acc)]
+            m.frustum((0, 0, 1.7), 0.62, 0.5, 3.4, rgbf(trunk), 'z', 10)
+            m.sphere((0, 0, 3.4), 2.7, rgbf(cap), 12, 6, (1, 1, 0.5))
+            m.disc((0, 0, 3.32), 2.5, rgbf(shade_rgb(cap, 0.55)), 'z', 14)
+            for (x, y, z) in ((1.2, 0.6, 4.55), (-1.0, 0.9, 4.5), (0.2, -1.3, 4.5), (-0.6, -0.4, 4.75), (1.6, -0.8, 4.1)):
+                m.sphere((x, y, z), 0.28, (1, 1, 1, 1), 6, 3, (1, 1, 0.6))
+        elif kind == 'coral':
+            c = acc[var % len(acc)]
+            rnd = Rng(var * 13 + 5)
+            for k in range(6):
+                x, y = (rnd() - 0.5) * 2.4, (rnd() - 0.5) * 2.4
+                h = 1.5 + rnd() * 2.6
+                cc = shade_rgb(c, 0.8 + rnd() * 0.4)
+                m.frustum((x, y, h / 2), 0.3, 0.24, h, rgbf(cc), 'z', 7)
+                m.sphere((x, y, h), 0.32, rgbf(shade_rgb(cc, 1.25)), 6, 4)
+        elif kind == 'barrel':
+            bc = acc[1] if len(acc) > 1 and acc[1][0] > 150 else (230, 200, 40)
+            for (x, y) in ((-0.65, 0.0), (0.65, 0.1), (0.0, 1.0)):
+                m.frustum((x, y, 0.8), 0.55, 0.55, 1.6, rgbf(bc), 'z', 10)
+                m.frustum((x, y, 0.35), 0.57, 0.57, 0.12, rgbf((40, 40, 40)), 'z', 10)
+                m.frustum((x, y, 1.25), 0.57, 0.57, 0.12, rgbf((40, 40, 40)), 'z', 10)
+        elif kind == 'pillar':
+            pc = rgbf(mix_rgb(rc[0], (235, 230, 215), 0.4))
+            h = 8.0 if var == 0 else 4.8
+            m.box((0, 0, 0.3), (1.1, 1.1, 0.3), rgbf(mix_rgb(rc[0], (235, 230, 215), 0.3)))
+            m.frustum((0, 0, 0.6 + h / 2), 0.78, 0.68, h, pc, 'z', 12)
+            if var == 0:
+                m.box((0, 0, 0.6 + h + 0.3), (1.0, 1.0, 0.3), pc)
+        elif kind == 'haystack':
+            hc = (224, 186, 94)
+            m.sphere((0, 0, 1.0), 2.0, rgbf(hc), 10, 6, (1, 1, 0.78))
+            m.sphere((0.3, -0.2, 1.2), 1.5, rgbf(hc, 1.08), 8, 5, (1, 1, 0.9))
+        elif kind == 'windmill':
+            wc = rgbf((232, 226, 214))
+            m.frustum((0, 0, 5.0), 2.2, 1.4, 10.0, wc, 'z', 10)
+            m.frustum((0, 0, 10.8), 1.7, 0.0, 1.8, rgbf((150, 52, 40)), 'z', 10)
+            m.box((0, -1.55, 0.9), (0.5, 0.1, 0.9), rgbf((90, 60, 40)))
+            bc = rgbf((245, 240, 230))
+            m.box((0, -1.6, 9.4), (5.6, 0.08, 0.45), bc)
+            m.box((0, -1.6, 9.4), (0.45, 0.08, 5.6), bc)
+            m.sphere((0, -1.7, 9.4), 0.35, rgbf((80, 60, 40)), 6, 4)
+        elif kind == 'flowers':
+            fc = flower[var % len(flower)]
+            m.sphere((0, 0, 0.25), 1.9, rgbf(shade_rgb(leaf[1], 0.9)), 9, 4, (1, 1, 0.22))
+            rnd = Rng(var * 7 + 3)
+            for _ in range(11):
+                m.sphere(((rnd() - 0.5) * 3.0, (rnd() - 0.5) * 3.0, 0.6 + rnd() * 0.25), 0.2, rgbf(fc), 5, 3)
+        elif kind == 'tombstone':
+            gc = rgbf(mix_rgb(rc[0], (150, 150, 155), 0.4))
+            if var == 0:
+                m.box((0, 0, 0.85), (0.6, 0.16, 0.85), gc)
+                m.frustum((0, 0, 1.7), 0.6, 0.6, 0.32, gc, 'y', 10)
+            else:
+                m.box((0, 0, 1.1), (0.12, 0.12, 1.1), gc)
+                m.box((0, 0, 1.5), (0.5, 0.12, 0.12), gc)
+            m.box((0, 0.3, 0.05), (0.8, 0.9, 0.05), rgbf(shade_rgb(mix_rgb(rc[0], (150, 150, 155), 0.4), 0.7)))
+        elif kind == 'pumpkin':
+            pc = (236, 120, 24)
+            m.sphere((-0.38, 0, 0.55), 0.55, rgbf(pc, 0.85), 8, 5)
+            m.sphere((0.38, 0, 0.55), 0.55, rgbf(pc, 0.85), 8, 5)
+            m.sphere((0, 0, 0.6), 0.62, rgbf(pc), 8, 5)
+            m.box((0, 0, 1.25), (0.07, 0.07, 0.15), rgbf((70, 110, 40)))
+            if night:
+                for x in (-0.22, 0.22):
+                    g.box((x, -0.6, 0.72), (0.09, 0.02, 0.07), (2.0, 1.7, 0.6, 1))
+                g.box((0, -0.6, 0.45), (0.25, 0.02, 0.05), (2.0, 1.7, 0.6, 1))
+        elif kind == 'chimney':
+            bc = (122, 72, 52)
+            m.box((0, 0, 2.5), (4.0, 3.0, 2.5), rgbf(bc))
+            m.frustum((1.6, 0, 11.0), 1.0, 0.8, 18.0, rgbf(bc, 0.8), 'z', 10)
+            g.frustum((1.6, 0, 19.4), 0.86, 0.86, 0.5, rgbf(acc[0], 1.4), 'z', 10)
+            for x in (-2.6, -1.2, 0.2, 1.6, 3.0):
+                (g if night else m).box((x, -3.02, 2.8), (0.45, 0.02, 0.6), (2.0, 1.6, 0.8, 1) if night else (0.2, 0.17, 0.15, 1))
+        elif kind == 'pyramid':
+            pc = mix_rgb(rc[0], (230, 200, 140), 0.35)
+            m.frustum((0, 0, 4.5), 9.9, 0.0, 9.0, rgbf(pc), 'z', 4)
+        elif kind == 'dome':
+            m.sphere((0, 0, 0.2), 5.0, rgbf((170, 220, 255)), 14, 7, (1, 1, 0.58))
+            m.frustum((0, 0, 0.25), 5.2, 5.2, 0.5, rgbf((150, 150, 160)), 'z', 16)
+            g.box((0, -4.95, 1.0), (1.0, 0.05, 0.8), (2.0, 1.8, 1.0, 1) if night else rgbf((120, 200, 255), 1.4))
+        elif kind == 'icespike':
+            ic = mix_rgb(th.get('crystal') or (180, 225, 255), (230, 245, 255), 0.4)
+            for (x, y, r, h) in ((-0.9, 0.1, 0.7, 4.2), (0.6, -0.3, 0.8, 5.4), (0.0, 0.6, 0.9, 6.0), (1.3, 0.5, 0.5, 3.0)):
+                m.frustum((x, y, h / 2), r, 0.0, h, rgbf(ic), 'z', 5)
+        elif kind == 'lantern':
+            lc = acc[0] if acc else (255, 120, 60)
+            m.frustum((0, 0, 1.1), 0.13, 0.13, 2.2, rgbf((110, 110, 112)), 'z', 6)
+            m.box((0, 0, 0.1), (0.4, 0.4, 0.1), rgbf((110, 110, 112)))
+            g.box((0, 0, 2.5), (0.35, 0.35, 0.35), rgbf(lc, 1.6 if night else 1.0))
+            m.frustum((0, 0, 3.05), 0.62, 0.0, 0.5, rgbf((70, 60, 60)), 'z', 6)
+        elif kind == 'blocks':
+            rnd = Rng(var * 19 + 1)
+            z = 0.0
+            for k in range(3):
+                hx = 1.6 - k * 0.35 + rnd() * 0.2
+                hz = 0.55 + rnd() * 0.3
+                c = acc[(var + k) % len(acc)]
+                ox = (rnd() - 0.5) * 0.4
+                m.box((ox, 0, z + hz), (hx, hx * 0.8, hz), rgbf(c))
+                for sx in (-0.5, 0.5):
+                    m.frustum((ox + sx * hx, 0, z + 2 * hz + 0.1), 0.25, 0.25, 0.2, rgbf(c, 1.15), 'z', 8)
+                z += 2 * hz + 0.05
+        elif kind == 'dish':
+            lc = rgbf((150, 150, 158))
+            m.frustum((0, 0, 1.8), 0.15, 0.12, 3.6, lc, 'z', 6)
+            m.frustum((0, 0, 4.0), 0.3, 2.3, 1.0, rgbf((235, 238, 245)), 'z', 14, False)
+            m.frustum((0, 0, 3.5), 0.3, 0.3, 0.3, lc, 'z', 6)
+            m.frustum((0, 0, 4.9), 0.06, 0.06, 1.6, lc, 'z', 5)
+            g.sphere((0, 0, 5.75), 0.14, (2.0, 0.4, 0.4, 1), 6, 3)
+        elif kind == 'sunflower':
+            fc = flower[0]
+            for (x, y, h) in ((-0.8, 0.1, 2.8), (0.2, -0.3, 3.3), (0.9, 0.4, 2.5)):
+                m.frustum((x, y, h / 2), 0.06, 0.05, h, rgbf((60, 130, 50)), 'z', 5)
+                m.box((x + 0.2, y, h * 0.45), (0.25, 0.04, 0.1), rgbf((70, 150, 60)))
+                m.disc((x, y - 0.06, h), 0.55, rgbf(fc), 'y', 12)
+                m.disc((x, y - 0.08, h), 0.24, rgbf((100, 60, 30)), 'y', 10)
+        elif kind == 'cloud':
+            c0 = leaf[0] if leaf[0][0] > 200 else (250, 252, 255)
+            for (x, y, z, r) in ((-1.0, 0, 1.0, 1.2), (0.6, 0.2, 1.3, 1.5), (0.0, -0.3, 1.9, 1.0), (1.5, -0.1, 0.8, 0.9)):
+                m.sphere((x, y, z), r, rgbf(c0), 9, 5)
+        return m, (g if g.v else None)
 
     def _props(self):
         tr = self.track
         protos = {}
         chunks = {}
-        rnd = Rng(tr.info['seed'] ^ 0x5151)
-        VAR = {'roundtree': 4, 'lollipop': 6, 'icecream': 3}
         holder = NodePath('protos')
         for p in tr.props:
             kind = p['kind']
-            if kind == 'roundtree':
-                var = int(p['r1'] * 4)
-            elif kind == 'lollipop':
-                var = int(p['r1'] * 6)
-            elif kind == 'icecream':
-                var = int(p['r1'] * 3)
-            else:
-                var = 0
+            nv = PROP_VARS.get(kind, 1)
+            var = int(p['r1'] * nv) % nv if nv > 1 else 0
             key = (kind, var)
             pr = protos.get(key)
             if pr is None:
@@ -564,9 +717,9 @@ class World(object):
                 lit.setTwoSided(True)
                 parts = [lit]
                 if glow is not None:
-                    g = glow.attach(holder, 'g_%s_%d' % key)
-                    g.setLightOff()
-                    parts.append(g)
+                    gn = glow.attach(holder, 'g_%s_%d' % key)
+                    gn.setLightOff()
+                    parts.append(gn)
                 pr = protos[key] = parts
             ck = p['seg'] // 36
             chunk = chunks.get(ck)
@@ -583,7 +736,7 @@ class World(object):
                 sc = (s * 1.4, s * 1.4, s * (1.0 + p['r1'] * 0.8))
             else:
                 sc = (s, s, s)
-            shade = 0.82 + p['r1'] * 0.3 if kind not in ('lollipop', 'icecream', 'building', 'crystal') else 1.0
+            shade = 0.82 + p['r1'] * 0.3 if kind in ('pine', 'roundtree', 'bush', 'rock', 'cactus', 'palm', 'acacia', 'bamboo', 'deadtree', 'flowers') else 1.0
             for part in pr:
                 inst = part.copyTo(chunk)
                 inst.setPos(*pos)

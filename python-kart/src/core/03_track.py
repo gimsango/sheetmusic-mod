@@ -164,7 +164,7 @@ class Track(object):
 
     def __init__(self, map_id, outline_only=False):
         self.info = map_info(map_id)
-        self.theme = THEMES[self.info['theme']]
+        self.theme = biome(map_id)
         r = Rng(self.info['seed'])
         self.width = 15.0 + int(r() * 5)
         self.hw = self.width / 2.0

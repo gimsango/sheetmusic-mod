@@ -262,27 +262,36 @@ class Particles(object):
 
 
 class Weather(object):
-    """카메라 주변을 도는 점 입자 (눈/불씨/낙엽/스프링클)"""
+    """카메라 주변을 도는 날씨 입자 (눈/비/불씨/낙엽/꽃잎/포자/반딧불/재/거품/반짝이/먼지/스프링클)"""
 
-    def __init__(self, app, kind):
+    def __init__(self, app, kind, color=None):
         self.app = app
         self.kind = kind
-        self.n = 520 if kind == 'snow' else 320
+        spec = WEATHER.get(kind, ((255, 255, 255), 3.0, 1.0, 2))
+        self.vy = -spec[1]
+        self.drift = spec[2]
+        self.n = {'snow': 520, 'rain': 700, 'firefly': 160, 'sparkle': 110, 'dust': 260}.get(kind, 320)
+        self.lines = kind == 'rain'
         fmt = GeomVertexFormat.getV3()
         self.vd = GeomVertexData('weather', fmt, Geom.UHDynamic)
-        self.vd.setNumRows(self.n)
+        self.vd.setNumRows(self.n * (2 if self.lines else 1))
         rnd = Rng(99)
         self.pos = [[(rnd() - 0.5) * 160, (rnd() - 0.5) * 160, rnd() * 70, rnd() * 6.28] for _ in range(self.n)]
-        prim = GeomPoints(Geom.UHStatic)
-        prim.addNextVertices(self.n)
+        if self.lines:
+            prim = GeomLines(Geom.UHStatic)
+            for i in range(self.n):
+                prim.addVertices(2 * i, 2 * i + 1)
+        else:
+            prim = GeomPoints(Geom.UHStatic)
+            prim.addNextVertices(self.n)
         geom = Geom(self.vd)
         geom.addPrimitive(prim)
         gn = GeomNode('weather')
         gn.addGeom(geom)
         self.np = app.render.attachNewNode(gn)
-        col = {'snow': (1, 1, 1, 1), 'ember': (1, 0.55, 0.18, 1), 'leaf': (0.85, 0.4, 0.15, 1), 'sprinkle': (1, 0.5, 0.8, 1)}[kind]
-        self.np.setColor(*col)
-        self.np.setRenderModeThickness(3.0 if kind == 'snow' else 4.0)
+        c = color or spec[0] or (255, 255, 255)
+        self.np.setColor(c[0] / 255.0, c[1] / 255.0, c[2] / 255.0, 1)
+        self.np.setRenderModeThickness(1.5 if self.lines else (1.8 if kind == 'sparkle' else (3.0 if kind in ('snow', 'dust') else 4.0)))
         self.np.setLightOff()
         self.np.setBin('fixed', 25)
         self.np.setDepthWrite(False)
@@ -292,19 +301,29 @@ class Weather(object):
 
     def update(self, dt, cam):
         self.t += dt
+        t = self.t
         vw = GeomVertexWriter(self.vd, 'vertex')
-        vy = 2.4 if self.kind == 'ember' else -3.4
+        vy, dr = self.vy, self.drift
         cx, cy, cz = cam
+        fire = self.kind == 'firefly'
         for i, p in enumerate(self.pos):
-            p[2] += vy * dt * (0.6 + (i % 5) * 0.2)
-            p[0] += math.sin(self.t + p[3]) * dt * 1.2
+            if fire:
+                p[0] += math.cos(t * 0.9 + p[3] * 3.0) * dt * 2.0
+                p[1] += math.sin(t * 0.8 + p[3] * 2.0) * dt * 2.0
+                p[2] += math.sin(t * 0.7 + p[3] * 2.0) * dt * 1.2
+            else:
+                p[2] += vy * dt * (0.6 + (i % 5) * 0.2)
+                p[0] += math.sin(t + p[3]) * dt * dr
             if p[2] < 0:
                 p[2] += 70
             elif p[2] > 70:
                 p[2] -= 70
             x = ((p[0] - cx + 80) % 160) - 80 + cx
             y = ((p[1] - cy + 80) % 160) - 80 + cy
-            vw.setData3(x, y, p[2] + cz - 25)
+            z = p[2] + cz - 25
+            vw.setData3(x, y, z)
+            if self.lines:
+                vw.setData3(x + 0.12, y, z + 1.3)
 
     def destroy(self):
         self.np.removeNode()

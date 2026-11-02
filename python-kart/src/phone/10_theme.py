@@ -1,6 +1,6 @@
 
 # ============================================================================
-#  [폰] 테마별 색상표 / 안개 / 하늘 / 배경 파노라마 / 장식물 스프라이트
+#  [폰] 바이옴별 색상표 / 안개 / 하늘(오로라) / 지평선 파노라마 / 장식물 스프라이트 (32종)
 # ============================================================================
 FOGN = 16
 
@@ -14,6 +14,12 @@ SPRITE_DIM = {
     'pine': (7.0, 11.0, 70, 110), 'roundtree': (7.5, 9.5, 75, 95), 'bush': (3.4, 2.2, 34, 22), 'cactus': (4.2, 6.5, 42, 65),
     'rock': (6.0, 3.6, 60, 36), 'mesa': (20.0, 24.0, 100, 120), 'palm': (9.0, 10.5, 90, 105), 'building': (1.0, 1.0, 64, 128),
     'crystal': (3.4, 8.0, 34, 80), 'lollipop': (4.4, 7.6, 44, 76), 'icecream': (3.4, 7.6, 34, 76),
+    'acacia': (9.0, 7.0, 90, 70), 'deadtree': (6.0, 8.0, 60, 80), 'bamboo': (3.2, 12.0, 32, 120), 'mushroom': (6.0, 7.0, 60, 70),
+    'coral': (4.0, 4.4, 40, 44), 'barrel': (3.2, 1.9, 48, 28), 'pillar': (2.6, 10.0, 26, 100), 'haystack': (4.0, 3.0, 40, 30),
+    'windmill': (9.0, 14.0, 72, 112), 'flowers': (4.0, 1.4, 48, 17), 'tombstone': (1.6, 2.2, 32, 44), 'pumpkin': (1.9, 1.6, 38, 32),
+    'chimney': (8.0, 22.0, 48, 132), 'pyramid': (14.0, 9.0, 112, 72), 'dome': (10.0, 5.6, 100, 56), 'icespike': (3.6, 6.0, 36, 60),
+    'lantern': (1.4, 3.4, 20, 48), 'blocks': (4.0, 5.0, 40, 50), 'dish': (5.0, 6.0, 50, 60), 'sunflower': (3.0, 3.6, 36, 44),
+    'cloud': (5.0, 3.0, 60, 36),
 }
 
 
@@ -25,30 +31,51 @@ def _ell(s, c, cx, cy, rx, ry):
     pygame.draw.ellipse(s, c, (int(cx - rx), int(cy - ry), max(1, int(rx * 2)), max(1, int(ry * 2))))
 
 
+def _rr(s, c, rect, r):
+    try:
+        pygame.draw.rect(s, c, rect, border_radius=int(r))
+    except TypeError:
+        pygame.draw.rect(s, c, rect)
+
+
+def _pal(th, key, default):
+    v = th.get(key)
+    return v if v else default
+
+
 def make_sprite(kind, th, var):
     cw, ch = SPRITE_DIM[kind][2], SPRITE_DIM[kind][3]
     s = _surf(cw, ch)
     cx = cw / 2.0
+    leaf = _pal(th, 'leaf', [(47, 127, 53), (58, 140, 58), (74, 160, 74), (90, 170, 80)])
+    trunk = _pal(th, 'trunk', (90, 59, 34))
+    acc = _pal(th, 'accent', [(255, 43, 214), (25, 230, 255), (255, 225, 74), (120, 255, 150)])
+    flower = _pal(th, 'flower', [(255, 224, 64), (255, 96, 128), (255, 255, 255), (176, 123, 255)])
+    rk = (hex_rgb(th['rock'][0]), hex_rgb(th['rock'][1]))
+    night = bool(th.get('night'))
     if kind == 'pine':
-        snowy = th.get('snowy')
-        pygame.draw.rect(s, (90, 59, 34), (int(cx - 4), ch - 20, 8, 20))
-        cols = [(31, 107, 53), (42, 125, 63), (53, 145, 74)] if not snowy else [(79, 127, 102), (109, 154, 132), (242, 247, 251)]
+        pygame.draw.rect(s, trunk, (int(cx - 4), ch - 20, 8, 20))
+        if th.get('snowy'):
+            cols = [mix_rgb(leaf[0], (240, 246, 252), 0.15), mix_rgb(leaf[1], (240, 246, 252), 0.35), (242, 247, 251)]
+        else:
+            cols = [leaf[0], leaf[1], leaf[2]]
         for (by, hw_, h_), c in zip(((ch - 14, 34, 44), (ch - 40, 28, 38), (ch - 64, 21, 34)), cols):
             pygame.draw.polygon(s, c, [(cx - hw_, by), (cx + hw_, by), (cx, by - h_)])
             pygame.draw.polygon(s, shade_rgb(c, 0.7), [(cx, by - h_), (cx + hw_, by), (cx, by)])
     elif kind == 'roundtree':
-        cols = [(217, 84, 30), (232, 163, 23), (184, 58, 26), (240, 192, 48)] if th.get('autumn') else [(58, 140, 58), (74, 160, 74), (47, 127, 53), (90, 170, 80)]
-        c = cols[var % len(cols)]
-        pygame.draw.rect(s, (90, 59, 34), (int(cx - 5), ch - 40, 10, 40))
+        c = leaf[var % len(leaf)]
+        pygame.draw.rect(s, trunk, (int(cx - 5), ch - 40, 10, 40))
         _ell(s, shade_rgb(c, 0.72), cx + 4, ch - 56, 33, 30)
         _ell(s, c, cx - 2, ch - 58, 31, 29)
         _ell(s, shade_rgb(c, 1.18), cx - 10, ch - 68, 16, 13)
+        if th.get('snowy'):
+            _ell(s, (240, 246, 252), cx - 4, ch - 80, 18, 7)
     elif kind == 'bush':
-        _ell(s, (40, 110, 48), cx + 2, ch - 8, 15, 9)
-        _ell(s, (58, 140, 58), cx - 3, ch - 9, 14, 9)
-        _ell(s, (88, 170, 80), cx - 6, ch - 12, 7, 4)
+        _ell(s, shade_rgb(leaf[0], 0.85), cx + 2, ch - 8, 15, 9)
+        _ell(s, leaf[1], cx - 3, ch - 9, 14, 9)
+        _ell(s, shade_rgb(leaf[2], 1.1), cx - 6, ch - 12, 7, 4)
     elif kind == 'cactus':
-        g = (59, 138, 74)
+        g = th.get('cactus') or (59, 138, 74)
         pygame.draw.rect(s, g, (int(cx - 7), 6, 14, ch - 6), border_radius=6)
         pygame.draw.rect(s, shade_rgb(g, 0.72), (int(cx + 1), 8, 6, ch - 10), border_radius=3)
         pygame.draw.rect(s, g, (int(cx - 20), 28, 20, 8), border_radius=3)
@@ -56,27 +83,28 @@ def make_sprite(kind, th, var):
         pygame.draw.rect(s, g, (int(cx + 5), 36, 18, 8), border_radius=3)
         pygame.draw.rect(s, g, (int(cx + 15), 22, 8, 22), border_radius=4)
     elif kind == 'rock':
-        c0, c1 = hex_rgb(th['rock'][0]), hex_rgb(th['rock'][1])
+        c0, c1 = rk
         pygame.draw.polygon(s, c0, [(2, ch), (8, 14), (24, 2), (44, 6), (58, 22), (58, ch)])
         pygame.draw.polygon(s, c1, [(30, 4), (44, 6), (58, 22), (58, ch), (32, ch), (34, 18)])
         pygame.draw.polygon(s, shade_rgb(c0, 1.2), [(8, 14), (24, 2), (30, 4), (20, 20)])
     elif kind == 'mesa':
-        for c, pts in (((176, 74, 40), [(0, ch), (14, 46), (86, 46), (100, ch)]), ((199, 101, 58), [(12, 62), (18, 24), (82, 24), (90, 62)]),
-                       ((168, 68, 36), [(22, 30), (26, 8), (74, 8), (78, 30)]), ((224, 160, 96), [(26, 10), (28, 4), (72, 4), (74, 10)])):
+        mc = _pal(th, 'mesa', [(176, 74, 40), (199, 101, 58), (168, 68, 36), (224, 160, 96)])
+        for c, pts in ((mc[0], [(0, ch), (14, 46), (86, 46), (100, ch)]), (mc[1], [(12, 62), (18, 24), (82, 24), (90, 62)]),
+                       (mc[2], [(22, 30), (26, 8), (74, 8), (78, 30)]), (mc[3], [(26, 10), (28, 4), (72, 4), (74, 10)])):
             pygame.draw.polygon(s, c, pts)
-        pygame.draw.polygon(s, (120, 48, 26), [(60, 8), (100, ch), (70, ch)])
+        pygame.draw.polygon(s, shade_rgb(mc[0], 0.68), [(60, 8), (100, ch), (70, ch)])
     elif kind == 'palm':
-        pygame.draw.polygon(s, (138, 106, 64), [(cx - 5, ch), (cx + 3, ch), (cx + 8, 22), (cx + 2, 22)])
-        for k, c in enumerate(((47, 143, 58), (58, 160, 70), (40, 125, 52), (70, 175, 80), (47, 143, 58), (58, 160, 70))):
+        tc = mix_rgb(trunk, (200, 170, 110), 0.45)
+        pygame.draw.polygon(s, tc, [(cx - 5, ch), (cx + 3, ch), (cx + 8, 22), (cx + 2, 22)])
+        for k in range(6):
+            c = leaf[k % len(leaf)]
             a = -2.7 + k * 0.54
             ex, ey = cx + 6 + math.cos(a) * 40, 22 + math.sin(a) * 22 + 12
             mx, my = cx + 6 + math.cos(a) * 20, 22 + math.sin(a) * 20 - 6
             pygame.draw.polygon(s, c, [(cx + 6, 22), (mx - 3, my - 5), (ex, ey), (mx + 3, my + 5)])
-        pygame.draw.circle(s, (90, 59, 34), (int(cx + 6), 24), 4)
+        pygame.draw.circle(s, shade_rgb(trunk, 0.9), (int(cx + 6), 24), 4)
     elif kind == 'building':
-        neon = th.get('night')
-        cols = [(255, 43, 214), (25, 230, 255), (255, 225, 74), (120, 255, 150)]
-        c = cols[var % 4]
+        c = acc[var % len(acc)]
         pygame.draw.rect(s, (22, 22, 44), (0, 0, cw, ch))
         pygame.draw.rect(s, (34, 34, 66), (cw - 14, 0, 14, ch))
         rnd = Rng(var * 977 + 13)
@@ -87,15 +115,15 @@ def make_sprite(kind, th, var):
                     pygame.draw.rect(s, wc, (x, y, 5, 5))
         pygame.draw.rect(s, c, (0, 0, cw, 3))
         pygame.draw.rect(s, c, (0, ch // 2, cw, 2))
-        if not neon:
+        if not night:
             pygame.draw.rect(s, (60, 60, 80), (0, 0, cw, ch), 2)
     elif kind == 'crystal':
-        col = (255, 122, 26) if th.get('lava') else ((25, 230, 255) if th['key'] == 'space' else (255, 43, 214))
+        col = th.get('crystal') or (255, 43, 214)
         pygame.draw.polygon(s, col, [(cx, 0), (cx + 12, ch * 0.45), (cx, ch), (cx - 12, ch * 0.45)])
         pygame.draw.polygon(s, shade_rgb(col, 0.62), [(cx, 0), (cx + 12, ch * 0.45), (cx, ch)])
         pygame.draw.polygon(s, shade_rgb(col, 1.35), [(cx, 4), (cx - 12, ch * 0.45), (cx - 3, ch * 0.45)])
     elif kind == 'lollipop':
-        hue = [(255, 90, 140), (90, 200, 255), (255, 200, 60), (160, 110, 255), (110, 230, 150), (255, 140, 60)][var % 6]
+        hue = acc[var % len(acc)]
         pygame.draw.rect(s, (245, 245, 245), (int(cx - 2), 30, 4, ch - 30))
         pygame.draw.circle(s, (255, 255, 255), (int(cx), 22), 21)
         pygame.draw.circle(s, hue, (int(cx), 22), 17)
@@ -105,15 +133,207 @@ def make_sprite(kind, th, var):
         pygame.draw.polygon(s, (224, 169, 106), [(cx - 13, 40), (cx + 13, 40), (cx, ch)])
         for k in range(3):
             pygame.draw.line(s, (190, 135, 80), (cx - 11 + k * 11, 42), (cx - 3 + k * 4, ch - 8), 1)
-        sc = [(255, 158, 196), (255, 235, 160), (150, 220, 255)][var % 3]
+        sc = mix_rgb(acc[(var + 1) % len(acc)], (255, 255, 255), 0.45)
         pygame.draw.circle(s, sc, (int(cx), 30), 15)
         pygame.draw.circle(s, shade_rgb(sc, 1.15), (int(cx - 4), 25), 6)
         pygame.draw.circle(s, (221, 34, 51), (int(cx), 12), 4)
+    elif kind == 'acacia':
+        pygame.draw.polygon(s, trunk, [(cx - 4, ch), (cx + 3, ch), (cx + 9, ch * 0.34), (cx + 4, ch * 0.34)])
+        pygame.draw.line(s, trunk, (int(cx + 2), int(ch * 0.62)), (int(cx - 14), int(ch * 0.34)), 3)
+        c = leaf[var % len(leaf)]
+        _ell(s, shade_rgb(c, 0.7), cx + 4, ch * 0.33, 42, 9)
+        _ell(s, c, cx + 2, ch * 0.27, 43, 10)
+        _ell(s, shade_rgb(c, 1.18), cx - 8, ch * 0.22, 20, 6)
+        if var:
+            _ell(s, c, cx - 16, ch * 0.4, 18, 5)
+    elif kind == 'deadtree':
+        pygame.draw.polygon(s, trunk, [(cx - 5, ch), (cx + 5, ch), (cx + 2, ch * 0.3), (cx - 2, ch * 0.3)])
+        rnd = Rng(var * 31 + 7)
+        for k in range(5):
+            y0 = ch * (0.35 + 0.1 * k)
+            sgn = -1 if (k + var) % 2 else 1
+            ex = cx + sgn * (12 + rnd() * 14)
+            ey = y0 - 10 - rnd() * 16
+            pygame.draw.line(s, trunk, (int(cx), int(y0)), (int(ex), int(ey)), max(1, 4 - k // 2))
+            pygame.draw.line(s, trunk, (int(ex), int(ey)), (int(ex + sgn * 6), int(ey - 8)), 1)
+    elif kind == 'bamboo':
+        rnd = Rng(17)
+        for k in range(5):
+            x = 3 + k * 6 + int(rnd() * 3)
+            top = int(4 + rnd() * 20)
+            c = shade_rgb(trunk, 0.85 + 0.25 * rnd())
+            pygame.draw.rect(s, c, (x, top, 4, ch - top))
+            for y in range(top + 10, ch, 13):
+                pygame.draw.line(s, shade_rgb(c, 0.6), (x, y), (x + 3, y), 1)
+            _ell(s, leaf[k % len(leaf)], x + 2 + (k % 2) * 4 - 2, top + 3, 6, 3)
+            _ell(s, leaf[(k + 1) % len(leaf)], x - 2, top + 16, 5, 2)
+    elif kind == 'mushroom':
+        cap = acc[var % len(acc)]
+        _rr(s, trunk, (int(cx - 7), int(ch * 0.42), 14, int(ch * 0.58)), 5)
+        _ell(s, shade_rgb(trunk, 0.8), cx + 3, ch * 0.75, 3, 12)
+        _ell(s, shade_rgb(cap, 0.65), cx, ch * 0.42, 27, 9)
+        pygame.draw.ellipse(s, cap, (int(cx - 28), 2, 56, int(ch * 0.8)))
+        pygame.draw.rect(s, (0, 0, 0, 0), (0, int(ch * 0.42), cw, ch))
+        _rr(s, trunk, (int(cx - 7), int(ch * 0.42), 14, int(ch * 0.58)), 5)
+        _ell(s, shade_rgb(cap, 0.6), cx, ch * 0.42, 26, 4)
+        for (dx, dy, r_) in ((-12, 0.2, 4), (6, 0.12, 5), (16, 0.3, 3), (-2, 0.32, 3)):
+            pygame.draw.circle(s, (255, 255, 255), (int(cx + dx), int(ch * dy)), r_)
+    elif kind == 'coral':
+        c = acc[var % len(acc)]
+        rnd = Rng(var * 13 + 5)
+        for k in range(6):
+            x = 4 + k * 6
+            h = int(ch * (0.4 + rnd() * 0.55))
+            cc = shade_rgb(c, 0.8 + rnd() * 0.4)
+            _rr(s, cc, (x, ch - h, 6, h), 3)
+            pygame.draw.circle(s, shade_rgb(cc, 1.25), (x + 3, ch - h + 2), 4)
+    elif kind == 'barrel':
+        bc = acc[1] if len(acc) > 1 and acc[1][0] > 150 else (230, 200, 40)
+        for k in range(3):
+            x = 2 + k * 15
+            _rr(s, bc, (x, 4, 13, ch - 4), 3)
+            pygame.draw.rect(s, (40, 40, 40), (x, 9, 13, 2))
+            pygame.draw.rect(s, (40, 40, 40), (x, ch - 8, 13, 2))
+            pygame.draw.circle(s, (30, 30, 30), (x + 6, ch // 2 + 2), 3)
+    elif kind == 'pillar':
+        pc = mix_rgb(rk[0], (235, 230, 215), 0.4)
+        top = 8 if var == 0 else 26
+        pygame.draw.rect(s, shade_rgb(pc, 0.85), (2, ch - 8, cw - 4, 8))
+        pygame.draw.rect(s, pc, (5, top, cw - 10, ch - top - 8))
+        for x in range(8, cw - 6, 4):
+            pygame.draw.line(s, shade_rgb(pc, 0.78), (x, top + 2), (x, ch - 10), 1)
+        if var == 0:
+            pygame.draw.rect(s, shade_rgb(pc, 1.08), (1, 2, cw - 2, 7))
+        else:
+            pygame.draw.polygon(s, pc, [(5, top), (cw - 5, top), (cw - 8, top - 6), (10, top - 3)])
+    elif kind == 'haystack':
+        hc = (224, 186, 94)
+        _ell(s, shade_rgb(hc, 0.8), cx + 2, ch - 12, 19, 13)
+        _ell(s, hc, cx - 1, ch - 13, 18, 13)
+        for k in range(4):
+            pygame.draw.arc(s, shade_rgb(hc, 0.75), (int(cx - 15 + k * 3), int(ch - 24 + k * 3), 30 - k * 6, 22 - k * 4), 0.3, 2.8, 1)
+    elif kind == 'windmill':
+        wc = (232, 226, 214)
+        pygame.draw.polygon(s, wc, [(cx - 14, ch), (cx + 14, ch), (cx + 8, ch * 0.32), (cx - 8, ch * 0.32)])
+        pygame.draw.polygon(s, shade_rgb(wc, 0.8), [(cx + 2, ch), (cx + 14, ch), (cx + 8, ch * 0.32), (cx + 2, ch * 0.32)])
+        pygame.draw.polygon(s, (150, 52, 40), [(cx - 11, ch * 0.33), (cx + 11, ch * 0.33), (cx, ch * 0.22)])
+        pygame.draw.rect(s, (90, 60, 40), (int(cx - 4), ch - 14, 8, 14))
+        hy = int(ch * 0.3)
+        for a in (0.6, 2.17, 3.74, 5.31):
+            ex, ey = cx + math.cos(a) * 32, hy + math.sin(a) * 32
+            pygame.draw.line(s, (120, 90, 60), (int(cx), hy), (int(ex), int(ey)), 2)
+            px_, py_ = -math.sin(a) * 5, math.cos(a) * 5
+            pygame.draw.polygon(s, (245, 240, 230), [(cx + math.cos(a) * 8, hy + math.sin(a) * 8), (ex, ey), (ex + px_, ey + py_),
+                                                    (cx + math.cos(a) * 8 + px_, hy + math.sin(a) * 8 + py_)])
+        pygame.draw.circle(s, (80, 60, 40), (int(cx), hy), 3)
+    elif kind == 'flowers':
+        _ell(s, shade_rgb(leaf[1], 0.9), cx, ch - 5, 23, 6)
+        rnd = Rng(var * 7 + 3)
+        fc = flower[var % len(flower)]
+        for _ in range(11):
+            x = cx + (rnd() - 0.5) * 40
+            y = ch - 6 - rnd() * 9
+            pygame.draw.circle(s, fc, (int(x), int(y)), 3)
+            pygame.draw.circle(s, mix_rgb(fc, (255, 255, 255), 0.6), (int(x), int(y)), 1)
+    elif kind == 'tombstone':
+        gc = mix_rgb(rk[0], (150, 150, 155), 0.4)
+        if var == 0:
+            _rr(s, gc, (6, 4, cw - 12, ch - 4), 10)
+            pygame.draw.line(s, shade_rgb(gc, 0.6), (11, 18), (cw - 11, 18), 2)
+            pygame.draw.line(s, shade_rgb(gc, 0.6), (11, 25), (cw - 13, 25), 2)
+        else:
+            pygame.draw.rect(s, gc, (int(cx - 4), 2, 8, ch - 2))
+            pygame.draw.rect(s, gc, (int(cx - 12), 12, 24, 7))
+        pygame.draw.rect(s, shade_rgb(gc, 0.7), (2, ch - 4, cw - 4, 4))
+    elif kind == 'pumpkin':
+        pc = (236, 120, 24)
+        _ell(s, shade_rgb(pc, 0.8), cx - 9, ch - 12, 9, 11)
+        _ell(s, shade_rgb(pc, 0.8), cx + 9, ch - 12, 9, 11)
+        _ell(s, pc, cx, ch - 12, 11, 12)
+        pygame.draw.rect(s, (70, 110, 40), (int(cx - 2), 2, 4, 7))
+        if night:
+            pygame.draw.polygon(s, (255, 220, 80), [(cx - 8, ch - 16), (cx - 3, ch - 16), (cx - 5, ch - 20)])
+            pygame.draw.polygon(s, (255, 220, 80), [(cx + 3, ch - 16), (cx + 8, ch - 16), (cx + 5, ch - 20)])
+            pygame.draw.rect(s, (255, 220, 80), (int(cx - 7), ch - 10, 14, 3))
+    elif kind == 'chimney':
+        bc = (122, 72, 52)
+        pygame.draw.rect(s, bc, (0, int(ch * 0.62), cw, int(ch * 0.38)))
+        pygame.draw.rect(s, shade_rgb(bc, 0.8), (int(cw * 0.55), 6, 14, ch))
+        pygame.draw.rect(s, acc[0], (int(cw * 0.55) - 1, 10, 16, 4))
+        rnd = Rng(11)
+        for y in range(int(ch * 0.66), ch - 6, 9):
+            for x in range(4, cw - 6, 9):
+                if rnd() < 0.6:
+                    pygame.draw.rect(s, (255, 200, 110) if night or rnd() < 0.3 else (50, 40, 36), (x, y, 5, 5))
+    elif kind == 'pyramid':
+        pc = mix_rgb(rk[0], (230, 200, 140), 0.35)
+        pygame.draw.polygon(s, pc, [(0, ch), (cw, ch), (cx, 0)])
+        pygame.draw.polygon(s, shade_rgb(pc, 0.72), [(cx, 0), (cw, ch), (cx + 18, ch)])
+        for k in range(1, 8):
+            y = ch * k / 8.0
+            pygame.draw.line(s, shade_rgb(pc, 0.85), (cx - (cx * y / ch), y), (cx + (cx * y / ch), y), 1)
+    elif kind == 'dome':
+        gl = (170, 220, 255, 210)
+        pygame.draw.ellipse(s, gl, (6, 4, cw - 12, (ch - 10) * 2))
+        pygame.draw.rect(s, (0, 0, 0, 0), (0, ch - 8, cw, 8))
+        pygame.draw.ellipse(s, (220, 240, 255), (6, 4, cw - 12, (ch - 10) * 2), 2)
+        for k in range(1, 4):
+            pygame.draw.line(s, (220, 240, 255), (6 + (cw - 12) * k / 4.0, 8 + abs(2 - k) * 6), (6 + (cw - 12) * k / 4.0, ch - 8), 1)
+        pygame.draw.rect(s, (150, 150, 160), (2, ch - 8, cw - 4, 8))
+        pygame.draw.rect(s, (255, 230, 140) if night else (120, 200, 255), (int(cx - 6), ch - 18, 12, 10))
+    elif kind == 'icespike':
+        ic = th.get('crystal') or (180, 225, 255)
+        ic = mix_rgb(ic, (230, 245, 255), 0.4)
+        for (x, w_, h_) in ((cx - 9, 7, 0.7), (cx + 6, 8, 0.9), (cx - 1, 9, 1.0), (cx + 13, 5, 0.5)):
+            pygame.draw.polygon(s, ic, [(x - w_, ch), (x + w_, ch), (x, ch * (1 - h_))])
+            pygame.draw.polygon(s, shade_rgb(ic, 0.78), [(x, ch * (1 - h_)), (x + w_, ch), (x, ch)])
+    elif kind == 'lantern':
+        lc = acc[0] if acc else (255, 120, 60)
+        pygame.draw.rect(s, (110, 110, 112), (int(cx - 2), 18, 4, ch - 18))
+        pygame.draw.rect(s, (110, 110, 112), (int(cx - 6), ch - 4, 12, 4))
+        _rr(s, lc if night else shade_rgb(lc, 0.85), (int(cx - 6), 8, 12, 12), 3)
+        pygame.draw.polygon(s, (70, 60, 60), [(cx - 9, 9), (cx + 9, 9), (cx, 2)])
+    elif kind == 'blocks':
+        rnd = Rng(var * 19 + 1)
+        y = ch
+        for k in range(3):
+            w_ = int(34 - k * 7 + rnd() * 4)
+            h_ = int(12 + rnd() * 6)
+            x = int(cx - w_ / 2 + (rnd() - 0.5) * 6)
+            c = acc[(var + k) % len(acc)]
+            pygame.draw.rect(s, c, (x, y - h_, w_, h_))
+            pygame.draw.rect(s, shade_rgb(c, 0.75), (x + w_ - 5, y - h_, 5, h_))
+            for sx in range(x + 4, x + w_ - 4, 8):
+                pygame.draw.rect(s, shade_rgb(c, 1.15), (sx, y - h_ - 3, 5, 3))
+            y -= h_ + 3
+    elif kind == 'dish':
+        pygame.draw.line(s, (150, 150, 158), (int(cx), ch), (int(cx), int(ch * 0.45)), 3)
+        pygame.draw.line(s, (150, 150, 158), (int(cx - 12), ch), (int(cx), int(ch * 0.6)), 2)
+        pygame.draw.line(s, (150, 150, 158), (int(cx + 12), ch), (int(cx), int(ch * 0.6)), 2)
+        pygame.draw.ellipse(s, (235, 238, 245), (int(cx - 22), int(ch * 0.12), 44, 30))
+        pygame.draw.ellipse(s, (190, 195, 205), (int(cx - 16), int(ch * 0.18), 32, 20))
+        pygame.draw.line(s, (120, 120, 128), (int(cx), int(ch * 0.36)), (int(cx + 4), int(ch * 0.05)), 2)
+        pygame.draw.circle(s, (255, 80, 80), (int(cx + 4), int(ch * 0.05)), 2)
+    elif kind == 'sunflower':
+        fc = flower[0]
+        for k, (x, top) in enumerate(((cx - 10, 10), (cx + 2, 4), (cx + 12, 14))):
+            pygame.draw.line(s, (60, 130, 50), (int(x), ch), (int(x), top + 6), 2)
+            _ell(s, (70, 150, 60), x - 4, ch - 12 - k * 3, 4, 2)
+            for a in range(8):
+                ang = a * TAU / 8
+                pygame.draw.circle(s, fc, (int(x + math.cos(ang) * 5), int(top + 6 + math.sin(ang) * 5)), 3)
+            pygame.draw.circle(s, (100, 60, 30), (int(x), top + 6), 3)
+    elif kind == 'cloud':
+        c0 = leaf[0] if leaf[0][0] > 200 else (250, 252, 255)
+        _ell(s, shade_rgb(c0, 0.86), cx + 4, ch - 9, 26, 9)
+        _ell(s, c0, cx - 10, ch - 14, 16, 12)
+        _ell(s, c0, cx + 6, ch - 18, 18, 15)
+        _ell(s, shade_rgb(c0, 1.05), cx - 2, ch - 22, 10, 8)
     return s
 
 
 class ThemeGfx(object):
-    """하나의 맵 테마를 그리는 데 필요한 모든 캐시"""
+    """하나의 맵(바이옴)을 그리는 데 필요한 모든 캐시"""
 
     def __init__(self, th, seed, rw, rh, f, far):
         self.th = th
@@ -137,17 +357,18 @@ class ThemeGfx(object):
     # ---- 색상표 -----------------------------------------------------------------
     def _make_palette(self):
         th = self.th
-        amb = 0.86 if self.night else 1.0
+        amb = 0.86 if (self.night and not th.get('glow_wall')) else 1.0
         glow = bool(th.get('glow_wall'))
         road = hex_rgb(th['road'])
         g0, g1 = hex_rgb(th['ground'][0]), hex_rgb(th['ground'][1])
         w0, w1 = hex_rgb(th['wall'][0]), hex_rgb(th['wall'][1])
+        kb = th.get('kerb') or ((216, 35, 42), (240, 240, 240))
         wk = 1.0 if glow else amb
         base = {
             'road_a': shade_rgb(road, amb), 'road_b': shade_rgb(road, amb * 1.13),
             'grass_a': shade_rgb(g0, amb), 'grass_b': shade_rgb(g1, amb),
             'skirt_a': shade_rgb(g0, amb * 0.78), 'skirt_b': shade_rgb(g1, amb * 0.72),
-            'kerb_r': shade_rgb((216, 35, 42), amb), 'kerb_w': shade_rgb((240, 240, 240), amb),
+            'kerb_r': shade_rgb(kb[0], amb), 'kerb_w': shade_rgb(kb[1], amb),
             'wall_a': shade_rgb(w0, wk * 0.95), 'wall_b': shade_rgb(w1, wk * 0.95),
             'wall_a2': shade_rgb(w0, wk * 0.74), 'wall_b2': shade_rgb(w1, wk * 0.74),
             'wall_top': shade_rgb((226, 226, 232), wk),
@@ -162,9 +383,12 @@ class ThemeGfx(object):
 
     def _make_fog_lut(self):
         far = self.far
+        # 안개가 짙은 바이옴은 더 가까이부터 흐려진다
+        dens = clamp(self.th.get('fog_d', 0.0015) / 0.0015, 0.6, 2.6)
+        start = 0.12 / dens
         self.fog_lut = []
         for d in range(int(far) + 4):
-            t = clamp((d - 0.12 * far) / (0.88 * far), 0.0, 1.0) ** 1.2
+            t = clamp((d - start * far) / ((1.0 - start) * far / min(dens, 1.6)), 0.0, 1.0) ** 1.2
             self.fog_lut.append(min(FOGN - 1, int(t * FOGN)))
 
     # ---- 하늘 ----------------------------------------------------------------------
@@ -198,9 +422,23 @@ class ThemeGfx(object):
                 s.set_at((x, y), (b, b, min(255, b + 20), 255))
                 if rnd() < 0.18:
                     s.set_at((min(pw - 1, x + 1), y), (b, b, b, 200))
+        if self.th.get('aurora'):
+            for band, col in enumerate(((70, 255, 170, 80), (90, 210, 255, 64), (190, 120, 255, 52))):
+                ph1, amp = rnd() * TAU, ph * (0.03 + 0.015 * band)
+                y0 = ph * (0.6 + band * 0.08)
+                thick = ph * (0.09 - band * 0.015)
+                top, low = [], []
+                for i in range(0, 61):
+                    x = pw * i / 60.0
+                    a = TAU * i / 60.0
+                    y = y0 + math.sin(a * 3 + ph1) * amp + math.sin(a * 7 + ph1 * 2) * amp * 0.4
+                    top.append((x, y))
+                    low.append((x, y + thick * (0.7 + 0.3 * math.sin(a * 5 + ph1))))
+                pygame.draw.polygon(s, col, top + low[::-1])
         n = int(7 * self.th.get('clouds', 0))
         if n:
-            cc = (255, 240, 250, 205) if self.th['key'] == 'candy' else (255, 255, 255, 190)
+            c = self.th.get('cloud') or (255, 255, 255)
+            cc = (c[0], c[1], c[2], 190)
             for _ in range(n):
                 x = rnd() * pw
                 y = ph * (0.18 + rnd() * 0.5)
@@ -209,116 +447,58 @@ class ThemeGfx(object):
                     _ell(s, cc, (x + (j - 2) * sz * 0.7) % pw, y + (j % 2) * sz * 0.12, sz * (0.9 - 0.12 * abs(j - 2)), sz * 0.36)
         return s
 
-    # ---- 파노라마 (360도 배경) ------------------------------------------------------
+    # ---- 지평선 파노라마 (코어의 horizon_layers 정의를 그대로 그림) --------------------------
     def _make_pano(self, seed):
         th = self.th
         pw = max(64, int(TAU * self.f))
-        ph = int(self.rh * 0.36)
+        ph = int(self.rh * 0.62)
         s = _surf(pw, ph)
-        rnd = Rng(seed ^ 0x5bd1e995)
-        skyb = self.sky_bot
-        fog = self.fog
-        key = th['key']
+        k = self.f / 2500.0
 
-        def ridge(color, base, amp, harm=(1, 2, 3, 5, 8, 13), step=3):
-            phs = [rnd() * TAU for _ in harm]
-            pts = [(0, ph)]
-            for x in range(0, pw + step, step):
-                a = min(x, pw) / float(pw) * TAU
-                h = base
-                for k, p in zip(harm, phs):
-                    h += amp / (k ** 0.8) * math.sin(k * a + p)
-                pts.append((min(x, pw), ph - max(2, h)))
-            pts.append((pw, ph))
-            pygame.draw.polygon(s, color, pts)
-            return pts
+        def X(a):
+            return a * pw
 
-        far_c = mix_rgb(skyb, fog, 0.5)
-        if key in ('forest', 'autumn'):
-            col1 = (110, 140, 170) if key == 'forest' else (190, 150, 110)
-            ridge(mix_rgb(col1, skyb, 0.5), ph * 0.55, ph * 0.28)
-            c2 = (60, 110, 80) if key == 'forest' else (150, 95, 50)
-            ridge(mix_rgb(c2, fog, 0.35), ph * 0.34, ph * 0.18)
-            for _ in range(int(pw / 14)):
-                x = rnd() * pw
-                hh = 6 + rnd() * 10
-                base_y = ph - ph * 0.30 + (rnd() - 0.5) * 8
-                pygame.draw.polygon(s, mix_rgb(c2, fog, 0.15), [(x - 4, base_y + 6), (x + 4, base_y + 6), (x, base_y - hh)])
-        elif key == 'desert':
-            ridge(mix_rgb((200, 160, 100), skyb, 0.5), ph * 0.30, ph * 0.14, (1, 2, 3, 4))
-            for _ in range(3):
-                x = rnd() * pw
-                b = 22 + rnd() * 18
-                pygame.draw.polygon(s, mix_rgb((190, 150, 95), fog, 0.35), [(x - b, ph - 8), (x + b, ph - 8), (x, ph - 8 - b * 0.9)])
-            ridge(mix_rgb((214, 176, 110), fog, 0.2), ph * 0.2, ph * 0.1, (1, 2, 4, 6))
-        elif key == 'snow':
-            snow = ridge((246, 250, 255), ph * 0.62, ph * 0.32)
-            low = [(x, y + 15) for x, y in snow]
-            low[0] = (0, ph)
-            low[-1] = (pw, ph)
-            pygame.draw.polygon(s, mix_rgb((120, 150, 190), skyb, 0.4), low)
-            ridge(mix_rgb((95, 125, 105), fog, 0.45), ph * 0.26, ph * 0.12)
-        elif key == 'neon':
-            for layer, (col, hmax, wmax) in enumerate((((44, 22, 84), ph * 0.8, 26), ((22, 14, 52), ph * 0.55, 34))):
-                x = 0
-                while x < pw:
-                    bw = 10 + rnd() * wmax
-                    bh = 8 + rnd() * hmax
-                    pygame.draw.rect(s, col, (x, ph - bh, bw, bh))
-                    for wy in range(int(ph - bh + 4), ph - 3, 6):
-                        for wx in range(int(x + 3), int(x + bw - 3), 5):
-                            if rnd() < (0.25 if layer == 0 else 0.4):
-                                pygame.draw.rect(s, [(255, 225, 120), (120, 220, 255), (255, 90, 220)][int(rnd() * 3)], (wx, wy, 2, 2))
-                    if rnd() < 0.2:
-                        pygame.draw.line(s, (255, 60, 90), (x + bw / 2, ph - bh), (x + bw / 2, ph - bh - 7), 1)
-                    x += bw + rnd() * 4
-        elif key == 'volcano':
-            ridge((46, 22, 18), ph * 0.40, ph * 0.16)
-            for _ in range(2):
-                x = rnd() * pw
-                b = 46 + rnd() * 30
-                top = ph - ph * 0.88
-                pygame.draw.polygon(s, (52, 26, 20), [(x - b, ph), (x + b, ph), (x + 10, top), (x - 10, top)])
-                pygame.draw.polygon(s, (255, 110, 30), [(x - 10, top), (x + 10, top), (x + 5, top + 12), (x - 5, top + 9)])
-                pygame.draw.line(s, (255, 130, 40), (x - 2, top + 8), (x - 8, ph), 2)
-            ridge((34, 18, 16), ph * 0.2, ph * 0.1)
-        elif key == 'tropic':
-            sea = (30, 168, 200)
-            pygame.draw.rect(s, mix_rgb(sea, skyb, 0.25), (0, ph - int(ph * 0.34), pw, int(ph * 0.34)))
-            for _ in range(5):
-                x = rnd() * pw
-                w_ = 30 + rnd() * 50
-                pygame.draw.ellipse(s, mix_rgb((70, 150, 100), fog, 0.35), (int(x - w_), ph - int(ph * 0.34) - 8, int(w_ * 2), 18))
-            ridge(mix_rgb((235, 215, 160), fog, 0.2), ph * 0.14, ph * 0.04, (1, 3, 5))
-        elif key == 'candy':
-            ridge(mix_rgb((255, 190, 225), skyb, 0.35), ph * 0.48, ph * 0.22)
-            ridge(mix_rgb((190, 240, 255), fog, 0.3), ph * 0.28, ph * 0.14)
-            for _ in range(int(pw / 90)):
-                x = rnd() * pw
-                c = [(255, 90, 140), (90, 200, 255), (255, 200, 60)][int(rnd() * 3)]
-                pygame.draw.line(s, (255, 255, 255), (x, ph), (x, ph - 34), 2)
-                pygame.draw.circle(s, c, (int(x), ph - 38), 9)
-                pygame.draw.circle(s, (255, 255, 255), (int(x), ph - 38), 4)
-        elif key == 'space':
-            ridge((70, 70, 80), ph * 0.34, ph * 0.18)
-            px_ = rnd() * pw
-            pygame.draw.circle(s, (58, 111, 208), (int(px_), int(ph * 0.45)), int(ph * 0.34))
-            pygame.draw.circle(s, (30, 70, 150), (int(px_ + ph * 0.1), int(ph * 0.5)), int(ph * 0.26))
-            pygame.draw.ellipse(s, (200, 184, 144), (int(px_ - ph * 0.6), int(ph * 0.4), int(ph * 1.2), int(ph * 0.14)), 2)
-            ridge((92, 92, 104), ph * 0.18, ph * 0.1, (1, 2, 4, 7))
-        elif key == 'canyon':
-            for layer, (col, hmax) in enumerate((((150, 70, 50), ph * 0.8), ((120, 52, 36), ph * 0.55))):
-                x = 0
-                while x < pw:
-                    bw = 30 + rnd() * 80
-                    bh = hmax * (0.35 + rnd() * 0.65)
-                    c = mix_rgb(col, fog, 0.3 - layer * 0.15)
-                    pygame.draw.rect(s, c, (x, ph - bh, bw, bh))
-                    pygame.draw.rect(s, shade_rgb(c, 1.2), (x, ph - bh, bw, 3))
-                    pygame.draw.rect(s, shade_rgb(c, 0.8), (x + bw * 0.65, ph - bh, bw * 0.35, bh))
-                    if rnd() < 0.5:
-                        pygame.draw.rect(s, c, (x + bw * 0.2, ph - bh - 10, bw * 0.5, 10))
-                    x += bw * (0.5 + rnd() * 0.6)
+        def Y(h):
+            return ph - h * k
+
+        def wrap(fn, xmin, xmax):
+            fn(0)
+            if xmin < 0:
+                fn(pw)
+            if xmax > pw:
+                fn(-pw)
+        for rad, items in horizon_layers(th, seed):
+            for it in items:
+                t = it[0]
+                if t == 'ridge':
+                    col, top, hs = it[1], it[2], it[3]
+                    n = len(hs) - 1
+                    pts = [(0, ph)] + [(pw * i / float(n), Y(hs[i])) for i in range(n + 1)] + [(pw, ph)]
+                    if top:
+                        pygame.draw.polygon(s, top, pts)
+                        dy = max(2.0, ph * 0.03)
+                        pts2 = [(0, ph)] + [(pw * i / float(n), Y(hs[i]) + dy + (ph - Y(hs[i])) * 0.2) for i in range(n + 1)] + [(pw, ph)]
+                        pygame.draw.polygon(s, col, pts2)
+                    else:
+                        pygame.draw.polygon(s, col, pts)
+                elif t == 'poly':
+                    col = it[1]
+                    pts = [(X(a), Y(h)) for a, h in it[2]]
+                    xs = [p[0] for p in pts]
+                    wrap(lambda dx: pygame.draw.polygon(s, col, [(x + dx, y) for x, y in pts]), min(xs), max(xs))
+                elif t == 'disc':
+                    col, a, h, r = it[1], it[2], it[3], it[4]
+                    rp = max(1, int(r * k))
+                    x, y = X(a), Y(h)
+                    wrap(lambda dx: pygame.draw.circle(s, col, (int(x + dx), int(y)), rp), x - rp, x + rp)
+                elif t == 'ring':
+                    col, a, h, rx, ry, w = it[1], it[2], it[3], it[4], it[5], it[6]
+                    x, y = X(a), Y(h)
+                    rect = (int(x - rx * k), int(y - ry * k), max(2, int(rx * k * 2)), max(2, int(ry * k * 2)))
+                    wrap(lambda dx: pygame.draw.ellipse(s, col, (rect[0] + dx, rect[1], rect[2], rect[3]), max(1, int(w * k))), rect[0], rect[0] + rect[2])
+                elif t == 'line':
+                    pts = [(X(a), Y(h)) for a, h in it[2]]
+                    pygame.draw.lines(s, it[1], False, pts, max(1, int(it[3] * k)))
         return s
 
     # ---- 장식물 스프라이트 --------------------------------------------------------------

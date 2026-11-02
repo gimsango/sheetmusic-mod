@@ -163,7 +163,8 @@ class Game(ShowBase):
                 self.build_solo()
                 return
             if k == 't':
-                self.sel_map = wrap_map(((self.sel_map - 1) // 10) * 10 + (map_info(self.sel_map)['theme'] + 1) % 10 + 1)
+                fa, ti_, mi_ = biome_parts(self.sel_map)
+                self.sel_map = biome_map(fa + 1, ti_, mi_)
                 self.build_solo()
                 return
         self.menu.key(k, self.mult())
@@ -304,7 +305,7 @@ class Game(ShowBase):
         if self.err:
             rows.append(self.I(self.err, (1, 0.5, 0.5, 1)))
         rows.append(self.I('%s  #%d' % (kart_name(self.profile['kart'], LANG), int(self.profile['kart']) + 1), scale=0.045))
-        self.menu.set('TURBO KART 3D', rows, T('맵 1000개 · 카트 100,000종 · 아이템 100종 · WiFi 멀티', '1000 maps · 100,000 karts · 100 items · WiFi multiplayer'), T('↑↓ 선택   Enter 확인   F11 전체화면', 'Up/Down select   Enter OK   F11 fullscreen'))
+        self.menu.set('TURBO KART 3D', rows, T('맵·바이옴 1000종 · 카트 100,000종 · 아이템 100종 · WiFi 멀티', '1000 maps & biomes · 100,000 karts · 100 items · WiFi multiplayer'), T('↑↓ 선택   Enter 확인   F11 전체화면', 'Up/Down select   Enter OK   F11 fullscreen'))
 
     # ---- 솔로 ----
     def draw_outline(self, mid):
@@ -348,12 +349,20 @@ class Game(ShowBase):
                 self.build_solo()
             return f
 
-        def settheme(d):
+        def setpart(which, d):
             def f(m=1):
-                th = (map_info(self.sel_map)['theme'] + d) % 10
-                self.sel_map = wrap_map(((self.sel_map - 1) // 10) * 10 + th + 1)
+                fa, ti_, mi_ = biome_parts(self.sel_map)
+                if which == 0:
+                    fa += d
+                elif which == 1:
+                    ti_ += d
+                else:
+                    mi_ += d
+                self.sel_map = biome_map(fa, ti_, mi_)
                 self.build_solo()
             return f
+        fam = biome_parts(mid)[0]
+        fname, tname, moodname = biome_part_names(mid, LANG)
 
         def typemap():
             def done(t):
@@ -388,12 +397,15 @@ class Game(ShowBase):
         mname = T('아이템전 (아이템 100종)', 'Item battle (100 items)') if self.profile['mode'] == 'item' else T('스피드전', 'Speed race')
         rows = [self.R('%s  < %s >' % (T('모드', 'Mode'), mname), mode, mode, mode, id='mode'),
                 self.R('%s  < #%d / %d >' % (T('맵', 'Map'), mid, MAP_COUNT), typemap, chg(-1), chg(1), id='map'),
-                self.R('%s  < %s >' % (T('테마', 'Theme'), theme), None, settheme(-1), settheme(1), id='theme'),
+                self.R('%s  < %s (%d/%d) >' % (T('바이옴', 'Biome'), fname, fam + 1, BIOME_FAMILIES), None, setpart(0, -1), setpart(0, 1), id='theme'),
+                self.R('%s  < %s >' % (T('시간대', 'Time'), tname), None, setpart(1, -1), setpart(1, 1), id='time'),
+                self.R('%s  < %s >' % (T('색감', 'Mood'), moodname), None, setpart(2, -1), setpart(2, 1), id='mood'),
                 self.R('%s  < %d >' % (T('바퀴 수', 'Laps'), int(self.profile['laps'])), None, lap(-1), lap(1), id='laps'),
                 self.R('%s  < %d >' % (T('AI 상대', 'AI rivals'), int(self.profile['bots'])), None, bots(-1), bots(1), id='bots'),
                 self.R(T('출발!', 'START!'), start, kind='primary', id='start'),
                 self.R(T('뒤로', 'Back'), lambda: self.back(), id='back')]
-        self.menu.set(T('솔로 레이스', 'Solo race'), rows, name, T('←→ ±1   Shift ±10   Ctrl ±100   R 랜덤   T 테마   Enter(맵) 번호 입력', 'Left/Right ±1   Shift ±10   Ctrl ±100   R random   T theme   Enter on map: type number'))
+        self.menu.set(T('솔로 레이스', 'Solo race'), rows, '%s  ·  %s' % (name, theme),
+                      T('←→ ±1   Shift ±10   Ctrl ±100   R 랜덤   T 바이옴   Enter(맵) 번호 입력', 'Left/Right ±1   Shift ±10   Ctrl ±100   R random   T biome   Enter on map: type number'))
         self.draw_outline(mid)
 
     # ---- 차고 ----
@@ -571,7 +583,7 @@ class Game(ShowBase):
         for p in ses.players[:8]:
             rows.append(self.I(('* ' if p['id'] == ses.host_id else '  ') + p['name'] + ('  (YOU)' if p['id'] == ses.my_id else ''), (1, 0.72, 0.15, 1) if p['id'] == ses.my_id else None, 0.05))
         info = map_info(st['map'])
-        mname = info['name'] if LANG == 'ko' else info['name_en']
+        mname = '%s  ·  %s' % ((info['name'], info['theme_name']) if LANG == 'ko' else (info['name_en'], info['theme_en']))
         if ses.is_host:
             def mp(d):
                 def f(m=1):
@@ -637,7 +649,7 @@ class Game(ShowBase):
         self.nodes = {rc.id: KartNode(self, rc, self.world.root) for rc in self.race.racers}
         self.particles = Particles(self)
         wk = self.race.track.theme.get('weather')
-        self.weather = Weather(self, wk) if wk else None
+        self.weather = Weather(self, wk, self.race.track.theme.get('wcol')) if wk else None
         self.hud.build_minimap(self.race.track)
         nm = self.race.track.info['name' if LANG == 'ko' else 'name_en']
         self.hud.mapname.setText('#%d %s' % (map_id, nm))

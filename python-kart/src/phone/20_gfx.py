@@ -102,11 +102,16 @@ class Renderer(object):
         self.GX, self.GY, self.GZ = GX, GY, GZ
         self.weather = []
         wtype = th.get('weather')
-        if wtype:
-            rnd = Rng(track.info['seed'] ^ 77)
-            for _ in range(70):
-                self.weather.append([rnd() * self.rw, rnd() * self.rh, 14 + rnd() * 26, (rnd() - 0.5) * 8, 1 + int(rnd() * 2)])
         self.wtype = wtype
+        self.wcol = tuple(th.get('wcol') or (255, 255, 255))
+        if wtype:
+            spec = WEATHER.get(wtype, ((255, 255, 255), 3.0, 1.0, 2))
+            rnd = Rng(track.info['seed'] ^ 77)
+            n = 120 if wtype == 'rain' else (45 if wtype in ('firefly', 'sparkle') else 75)
+            k = self.rh / 30.0                      # m/s -> 화면 px/s (대략)
+            for _ in range(n):
+                self.weather.append([rnd() * self.rw, rnd() * self.rh, spec[1] * k * (0.6 + rnd() * 0.8), (rnd() - 0.5) * spec[2] * k,
+                                     1 + int(rnd() * spec[3]), rnd() * TAU])
         self.parts = []
         # 시작 게이트 박스 (트랙 로컬: x=오른쪽, y=위, z=진행방향)
         hwg = hw + 1.6
@@ -137,9 +142,17 @@ class Renderer(object):
                 p[4] -= 9.0 * dt
                 out.append(p)
         self.parts = out
+        wt = self.wtype
+        t = self.anim_t
         for w in self.weather:
-            w[1] += w[2] * dt * (-0.5 if self.wtype == 'ember' else 1.0)
-            w[0] += w[3] * dt
+            w[1] += w[2] * dt
+            if wt in ('leaf', 'petal', 'bubble', 'spore', 'snow'):
+                w[0] += (w[3] + math.sin(t * 1.7 + w[5]) * self.rh * 0.04) * dt
+            elif wt == 'firefly':
+                w[0] += math.cos(t * 0.9 + w[5] * 3.0) * self.rh * 0.05 * dt
+                w[1] += math.sin(t * 0.7 + w[5] * 2.0) * self.rh * 0.04 * dt
+            else:
+                w[0] += w[3] * dt
             if w[1] > self.rh + 4:
                 w[1] = -4
             elif w[1] < -4:
@@ -471,12 +484,9 @@ class Renderer(object):
             wm, hm = wm * s * 1.3, hm * s * (1.0 + p['r1'] * 0.7)
         else:
             wm, hm = wm * s, hm * s
-            if kind == 'roundtree':
-                var = int(p['r1'] * 4)
-            elif kind == 'lollipop':
-                var = int(p['r1'] * 6)
-            elif kind == 'icecream':
-                var = int(p['r1'] * 3)
+            nv = PROP_VARS.get(kind, 1)
+            if nv > 1:
+                var = int(p['r1'] * nv) % nv
         hpx = inv * hm
         wpx = inv * wm
         if hpx < 2.5 or sy < 0 or sy - hpx > self.rh or sx + wpx * 0.5 < 0 or sx - wpx * 0.5 > self.rw:
@@ -1000,15 +1010,34 @@ class Renderer(object):
     def _draw_weather(self):
         if not self.weather:
             return
-        col = {'snow': (255, 255, 255), 'ember': (255, 150, 50), 'leaf': (217, 100, 40), 'sprinkle': (255, 120, 200)}.get(self.wtype, (255, 255, 255))
+        col = self.wcol
+        wt = self.wtype
         s = self.surf
+        t = self.anim_t
         for w in self.weather:
-            if self.wtype == 'sprinkle':
-                pygame.draw.rect(s, [(255, 120, 200), (120, 220, 255), (255, 230, 100)][int(w[0]) % 3], (int(w[0]), int(w[1]), 2, 3))
+            x, y = int(w[0]), int(w[1])
+            if wt == 'sprinkle':
+                pygame.draw.rect(s, [(255, 120, 200), (120, 220, 255), (255, 230, 100)][x % 3], (x, y, 2, 3))
+            elif wt == 'rain':
+                pygame.draw.line(s, col, (x, y), (x - 2, y - 7), 1)
+            elif wt == 'firefly':
+                b = 0.5 + 0.5 * math.sin(t * 4.0 + w[5] * 5.0)
+                if b > 0.35:
+                    pygame.draw.circle(s, shade_rgb(col, 0.4 + 0.6 * b), (x, y), 2 if b > 0.8 else 1)
+            elif wt == 'sparkle':
+                if math.sin(t * 2.5 + w[5] * 7.0) > 0.75:
+                    pygame.draw.line(s, col, (x - 2, y), (x + 2, y), 1)
+                    pygame.draw.line(s, col, (x, y - 2), (x, y + 2), 1)
+            elif wt == 'bubble':
+                pygame.draw.circle(s, col, (x, y), 1 + w[4], 1)
+            elif wt == 'dust':
+                pygame.draw.line(s, col, (x, y), (x + 5, y), 1)
+            elif wt in ('leaf', 'petal'):
+                pygame.draw.rect(s, col, (x, y, 2 + w[4] // 2, 2))
             elif w[4] > 1:
-                pygame.draw.circle(s, col, (int(w[0]), int(w[1])), 1)
+                pygame.draw.circle(s, col, (x, y), 1)
             else:
-                s.set_at((int(w[0]) % self.rw, int(w[1]) % self.rh), col)
+                s.set_at((x % self.rw, y % self.rh), col)
 
     def _speed_lines(self, amt, t):
         s = self.surf

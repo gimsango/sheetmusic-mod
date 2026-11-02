@@ -70,4 +70,18 @@ for R in (R1, R2):
     for r in R.racers: assert r.total > 5, (R is R1, r.name, r.total)
 S2.leave(); pump(S1, secs=0.5); print('after guest left, players:', len(S1.players)); assert len(S1.players) == 1
 S1.leave()
+# 4) 바이옴 1000종: 맵마다 서로 다른 바이옴 (이름/조합 모두 고유), 생태계 40 x 25
+names = set(); names_en = set(); combo = set(); fam = {}
+for m in range(1, C.MAP_COUNT + 1):
+    b = C.biome(m)
+    names.add(b['name']); names_en.add(b['en']); combo.add((b['family'], b['time'], b['mod']))
+    fam[b['family']] = fam.get(b['family'], 0) + 1
+    assert C.biome_map(*C.biome_parts(m)) == m
+    assert C.map_info(m)['theme_name'] == b['name']
+assert len(names) == len(names_en) == len(combo) == 1000, (len(names), len(names_en), len(combo))
+assert len(fam) == C.BIOME_FAMILIES == 40 and set(fam.values()) == {25}, fam
+assert C.biome(77) is C.biome(77) and C.biome(77)['name'] == C.biome(77)['name']
+for m in (1, 40, 163, 500, 999):
+    assert C.horizon_layers(C.biome(m), C.map_info(m)['seed'])
+print('biomes OK: 1000 unique (40 families x 5 times x 5 moods), e.g.', C.biome(1)['name'], '/', C.biome(999)['name'])
 print('ALL CORE TESTS PASSED')

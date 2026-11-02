@@ -649,14 +649,34 @@ class App(object):
             r = R(x + i * (bw + gap), ny, bw, bh)
             if ui.button(surf, r, lab, 'primary' if d is None else 'normal', size=bh * 0.4, enabled=editable):
                 new = (1 + int(_random.random() * MAP_COUNT)) if d is None else ((mid - 1 + d) % MAP_COUNT) + 1
+        # 바이옴 선택: 생태계(40) / 시간대(5) / 색감(5)  -> 1000가지
         cy_ = ny + bh + 8 * u
         ch = max(28 * u, min(40 * u, (rect.bottom - pad - cy_ - 6 * u) / 2.0))
-        ti = map_info(mid)['theme']
-        cw = (w - gap * 4) / 5.0
-        for i, th in enumerate(THEMES):
-            r = R(x + (i % 5) * (cw + gap), cy_ + (i // 5) * (ch + 6 * u), cw, ch)
-            if ui.button(surf, r, th['name'] if LANG == 'ko' else th['en'], 'chipon' if i == ti else 'chip', size=ch * 0.44, enabled=editable):
-                new = ((mid - 1) // 10) * 10 + i + 1
+        fam, ti, mi = biome_parts(mid)
+        fname, tname, mname = biome_part_names(mid, LANG)
+        sb = ch * 1.3
+
+        def stepper(rx, ry, rw, label, on_d):
+            res = None
+            if ui.button(surf, R(rx, ry, sb, ch), '<', 'normal', size=ch * 0.5, enabled=editable):
+                res = on_d(-1)
+            if ui.button(surf, R(rx + rw - sb, ry, sb, ch), '>', 'normal', size=ch * 0.5, enabled=editable):
+                res = on_d(1)
+            mid_r = R(rx + sb + 3 * u, ry, rw - 2 * sb - 6 * u, ch)
+            ui.panel(surf, mid_r, 150, (20, 28, 56), int(8 * u))
+            size = ch * 0.44
+            tw_ = ui.render(label, size, (235, 240, 255)).get_width()
+            if tw_ > mid_r.w - 6 * u:
+                size = size * (mid_r.w - 6 * u) / float(tw_)
+            ui.text(surf, label, mid_r.centerx, mid_r.y + (ch - size * 1.15) / 2, size, (235, 240, 255), 'c', shadow=False)
+            return res
+        r1 = stepper(x, cy_, w, '%s  (%d/%d)' % (fname, fam + 1, BIOME_FAMILIES), lambda d: biome_map(fam + d, ti, mi))
+        half = (w - gap) / 2.0
+        r2 = stepper(x, cy_ + ch + 6 * u, half, tname, lambda d: biome_map(fam, ti + d, mi))
+        r3 = stepper(x + half + gap, cy_ + ch + 6 * u, half, mname, lambda d: biome_map(fam, ti, mi + d))
+        for rr_ in (r1, r2, r3):
+            if rr_ is not None:
+                new = rr_
         return new
 
     # ------------------------------------------------------------------ 메뉴
@@ -670,7 +690,13 @@ class App(object):
         anc = 'l' if land else 'c'
         ui.text(surf, 'TURBO', x, int(self.H * 0.05), 96 * u, (255, 255, 255), anc)
         ui.text(surf, 'KART 3D', x, int(self.H * 0.05) + 86 * u, 70 * u, (255, 176, 32), anc)
-        ui.text(surf, T('맵 1000개 · 카트 100,000종 · 아이템 100종 · WiFi 멀티', '1000 maps · 100,000 karts · 100 items · WiFi multiplayer'), x, int(self.H * 0.05) + 160 * u, 20 * u, (205, 220, 250), anc)
+        tag = T('맵·바이옴 1000종 · 카트 100,000종 · 아이템 100종 · WiFi 멀티', '1000 maps & biomes · 100,000 karts · 100 items · WiFi multiplayer')
+        tsz = 20 * u
+        tw_ = ui.render(tag, tsz, (205, 220, 250)).get_width()
+        lim = (self.W * 0.9) if not land else (self.W * 0.52)
+        if tw_ > lim:
+            tsz = tsz * lim / float(tw_)
+        ui.text(surf, tag, x, int(self.H * 0.05) + 160 * u, tsz, (205, 220, 250), anc)
         bw = self.W * 0.40 if land else self.W * 0.82
         bx = int(self.W * 0.06) if land else (self.W - bw) / 2
         by = self.H * 0.43 if land else self.H * 0.40
