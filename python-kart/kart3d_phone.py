@@ -4,7 +4,8 @@
 ==========================================================================
   TURBO KART 3D  -  폰 버전 (Pydroid 3)            [ kart3d_phone.py ]
 ==========================================================================
-  * 맵 1000개 / 카트 100,000종 / WiFi(LAN) 멀티플레이 / 터치 조작
+  * 맵 1000개 / 카트 100,000종 / 아이템전(아이템 100종) / WiFi(LAN) 멀티플레이 / 터치 조작
+  * 아이템: 화면 위 아이템 칸 3개를 터치 (키보드는 1·2·3, ↓ 누른 채 쓰면 뒤로 던지기)
   * 파일 하나로 실행됩니다. Pydroid 3 에서 이 파일을 열고 ▶ 를 누르세요.
   * 필요한 것: pygame  (Pydroid 3 > 메뉴 > Pip > "pygame" 설치)
     (PC 파이썬 3.14+ 는 `pip install pygame-ce` — 게임이 알아서 시도합니다)
@@ -206,7 +207,7 @@ except ImportError as _e:
 # -*- coding: utf-8 -*-
 # ============================================================================
 #  TURBO KART 3D (Python)  -  공통 코어
-#  맵 1000개 / 카트 100,000종 / 아케이드 물리 / AI / WiFi(LAN) 멀티플레이
+#  맵 1000개 / 카트 100,000종 / 아이템 100종 / 아케이드 물리 / AI / WiFi(LAN) 멀티플레이
 # ============================================================================
 import math
 import json
@@ -217,7 +218,7 @@ import os
 import sys
 import queue
 
-VERSION = '1.0'
+VERSION = '1.1'
 MAP_COUNT = 1000
 KART_COUNT = 100000
 DEFAULT_PORT = 5555
@@ -446,7 +447,7 @@ def kart_stats(kid):
     handling = c(b['han'] + w['han'] - (size - 2) * 0.2 + (0.4 if rim == 2 else 0))
     drift = c(b['dft'] + (0.8 if rim == 4 else 0) + (0.4 if size >= 3 else 0) - (0.2 if rim == 1 else 0))
     return dict(speed=speed, accel=accel, handling=handling, drift=drift,
-                max_speed=52 + speed * 3.0, accel_rate=15 + accel * 1.7, turn_rate=1.5 + handling * 0.11, drift_grip=4.2 - drift * 0.18)
+                max_speed=52 + speed * 3.0, accel_rate=15 + accel * 1.7, turn_rate=1.62 + handling * 0.12, drift_grip=4.2 - drift * 0.18)
 
 
 # ----------------------------------------------------------------------------
@@ -932,10 +933,16 @@ class Track(object):
 
 
 # ----------------------------------------------------------------------------
-#  아케이드 카트 물리 + AI
+#  아케이드 카트 물리 + AI  (+ 아이템전 상태이상: 스핀/날아감/축소/감속/미끄럼/빙결/무적/방패/유령/거대화/로켓…)
 # ----------------------------------------------------------------------------
 DRIFT_BOOST = (0.0, 0.7, 1.2, 1.9)
-STEER_RATES = ((4.5, 6.5), (7.0, 9.0), (11.0, 14.0))     # 조향 반응 설정별 (누를 때, 뗄 때) 속도
+STEER_RATES = ((6.0, 8.0), (10.0, 13.0), (16.0, 20.0))    # 조향 반응 설정별 (누를 때, 뗄 때) 속도
+NO_INPUT = {'steer': 0.0, 'throttle': 0.0, 'brake': 0.0, 'drift': False}
+
+# 다른 기기에 보내는 상태 비트 (원격 카트 표시용)
+FX_SPIN, FX_AIR, FX_SHRINK, FX_STAR, FX_SHIELD, FX_GHOST, FX_GIANT, FX_FREEZE, FX_AUTO, FX_HOP, FX_SLIDE, FX_MAGNET = (
+    1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048)
+FX_RAM = FX_STAR | FX_GIANT | FX_AUTO          # 부딪히면 상대를 날려버리는 상태
 
 
 def steer_step(cur, tgt, dt, resp=1):
@@ -984,6 +991,215 @@ class KartSim(object):
         self.finished = False
         self.events = []
         self.wrong_way = False
+        self.fx_reset()
+
+    # ---- 아이템 상태이상 ------------------------------------------------------------
+    def fx_reset(self):
+        self.spin_t = self.air_t = self.air_dur = 0.0
+        self.shrink_t = self.slow_t = self.slide_t = self.freeze_t = self.stun_t = self.rev_t = self.blind_t = 0.0
+        self.star_t = self.shield_t = self.ghost_t = self.giant_t = self.auto_t = self.grip_t = 0.0
+        self.magnet_t = self.engine_t = self.hop_t = self.hop_dur = self.immune_t = self.ram_cool = 0.0
+        self.shield_n = 0
+        self.slow_k = 1.0
+        self.engine_cap = 0.0
+        self.engine_acc = 1.0
+        self.auto_spd = 1.4
+        self.magnet_range = 80.0
+        self.boost_pow = 1.0
+        self.coins = 0
+        self.spin_ang = 0.0
+        self.air_y = 0.0
+        self.pull = None
+        self.fx_time = 0.0
+
+    def cure(self):
+        """나쁜 상태이상 모두 해제"""
+        self.spin_t = self.air_t = self.shrink_t = self.slow_t = self.slide_t = 0.0
+        self.freeze_t = self.stun_t = self.rev_t = self.blind_t = 0.0
+        self.slow_k = 1.0
+        self.spin_ang = 0.0
+        self.air_y = 0.0
+
+    def debuffed(self):
+        return (self.spin_t > 0 or self.shrink_t > 0 or self.slow_t > 0 or self.slide_t > 0 or self.freeze_t > 0
+                or self.stun_t > 0 or self.rev_t > 0 or self.blind_t > 0)
+
+    def invulnerable(self):
+        return self.star_t > 0 or self.auto_t > 0 or self.ghost_t > 0 or self.immune_t > 0
+
+    def hit(self, fx, dur=0.0, k=0.0):
+        """공격 받기 -> 'ok' (맞음) / 'block' (방패로 막음) / 'immune' (무적/점프 등으로 무시)"""
+        if self.finished or self.invulnerable():
+            return 'immune'
+        if self.giant_t > 0 and fx in ('spin', 'slide', 'slow', 'bump', 'flat', 'shrink', 'warpback'):
+            return 'immune'
+        if self.hop_t > 0 and fx in ('slide', 'slow'):          # 점프 중에는 바닥 함정이 안 통한다
+            return 'immune'
+        if self.shield_n > 0:
+            self.shield_n -= 1
+            if self.shield_n <= 0:
+                self.shield_t = 0.0
+            self.immune_t = max(self.immune_t, 0.5)
+            return 'block'
+        if fx in ('spin', 'launch', 'freeze', 'bump', 'flat'):
+            self.drifting = False
+            self.drift_charge = 0.0
+            self.drift_tier = 0
+            self.boost_t = 0.0
+        if fx == 'spin':
+            self.spin_t = max(self.spin_t, dur or 1.1)
+        elif fx == 'launch':
+            self.air_t = self.air_dur = dur or 1.25
+            self.spin_t = max(self.spin_t, self.air_t + 0.25)
+        elif fx == 'shrink':
+            self.shrink_t = max(self.shrink_t, dur or 6.0)
+            self.spin_t = max(self.spin_t, 0.5)
+            self.giant_t = 0.0
+        elif fx == 'flat':
+            self.shrink_t = max(self.shrink_t, dur or 3.5)
+            self.slow_t = max(self.slow_t, dur or 3.5)
+            self.slow_k = 0.7
+            self.spin_t = max(self.spin_t, 0.6)
+        elif fx == 'slow':
+            kk = clamp(k or 0.6, 0.2, 1.0)
+            self.slow_k = min(self.slow_k, kk) if self.slow_t > 0 else kk
+            self.slow_t = max(self.slow_t, dur or 3.0)
+        elif fx == 'slide':
+            self.slide_t = max(self.slide_t, dur or 2.0)
+        elif fx == 'freeze':
+            self.freeze_t = max(self.freeze_t, dur or 1.5)
+        elif fx == 'stun':
+            self.stun_t = max(self.stun_t, dur or 2.0)
+        elif fx == 'reverse':
+            self.rev_t = max(self.rev_t, dur or 4.0)
+        elif fx == 'blind':
+            self.blind_t = max(self.blind_t, dur or 4.0)
+        elif fx == 'bump':
+            self.vx *= 0.3
+            self.vz *= 0.3
+            self.speed = math.hypot(self.vx, self.vz)
+            self.wall_hit = 1.0
+            self.spin_t = max(self.spin_t, 0.4)
+        return 'ok'
+
+    def fx_bits(self):
+        b = 0
+        if self.spin_t > 0:
+            b |= FX_SPIN
+        if self.air_t > 0:
+            b |= FX_AIR
+        if self.shrink_t > 0:
+            b |= FX_SHRINK
+        if self.star_t > 0:
+            b |= FX_STAR
+        if self.shield_n > 0:
+            b |= FX_SHIELD
+        if self.ghost_t > 0:
+            b |= FX_GHOST
+        if self.giant_t > 0:
+            b |= FX_GIANT
+        if self.freeze_t > 0:
+            b |= FX_FREEZE
+        if self.auto_t > 0:
+            b |= FX_AUTO
+        if self.hop_t > 0:
+            b |= FX_HOP
+        if self.slide_t > 0:
+            b |= FX_SLIDE
+        if self.magnet_t > 0:
+            b |= FX_MAGNET
+        return b
+
+    def _tick_fx(self, dt):
+        self.fx_time += dt
+        if self.spin_t > 0:
+            self.spin_t -= dt
+            self.spin_ang += dt * 14.0
+            if self.spin_t <= 0:
+                self.spin_t = 0.0
+                self.spin_ang = 0.0
+        if self.air_t > 0:
+            self.air_t -= dt
+            f = 1.0 - max(0.0, self.air_t) / max(self.air_dur, 0.05)
+            self.air_y = math.sin(math.pi * f) * 3.4
+            if self.air_t <= 0:
+                self.air_t = 0.0
+                self.air_y = 0.0
+        elif self.hop_t > 0:
+            self.hop_t -= dt
+            f = 1.0 - max(0.0, self.hop_t) / max(self.hop_dur, 0.05)
+            self.air_y = math.sin(math.pi * f) * (1.2 + self.hop_dur * 0.9)
+            if self.hop_t <= 0:
+                self.hop_t = 0.0
+                self.air_y = 0.0
+        else:
+            self.air_y = 0.0
+        if self.shrink_t > 0:
+            self.shrink_t = max(0.0, self.shrink_t - dt)
+        if self.slow_t > 0:
+            self.slow_t -= dt
+            if self.slow_t <= 0:
+                self.slow_t = 0.0
+                self.slow_k = 1.0
+        if self.slide_t > 0:
+            self.slide_t = max(0.0, self.slide_t - dt)
+        if self.freeze_t > 0:
+            self.freeze_t = max(0.0, self.freeze_t - dt)
+        if self.stun_t > 0:
+            self.stun_t = max(0.0, self.stun_t - dt)
+        if self.rev_t > 0:
+            self.rev_t = max(0.0, self.rev_t - dt)
+        if self.blind_t > 0:
+            self.blind_t = max(0.0, self.blind_t - dt)
+        if self.star_t > 0:
+            self.star_t = max(0.0, self.star_t - dt)
+        if self.shield_t > 0:
+            self.shield_t -= dt
+            if self.shield_t <= 0:
+                self.shield_t = 0.0
+                self.shield_n = 0
+        if self.ghost_t > 0:
+            self.ghost_t = max(0.0, self.ghost_t - dt)
+        if self.giant_t > 0:
+            self.giant_t = max(0.0, self.giant_t - dt)
+        if self.auto_t > 0:
+            self.auto_t = max(0.0, self.auto_t - dt)
+        if self.grip_t > 0:
+            self.grip_t = max(0.0, self.grip_t - dt)
+        if self.magnet_t > 0:
+            self.magnet_t -= dt
+            if self.magnet_t <= 0:
+                self.magnet_t = 0.0
+                self.pull = None
+        if self.engine_t > 0:
+            self.engine_t = max(0.0, self.engine_t - dt)
+        if self.immune_t > 0:
+            self.immune_t = max(0.0, self.immune_t - dt)
+        if self.ram_cool > 0:
+            self.ram_cool = max(0.0, self.ram_cool - dt)
+
+    def _autopilot(self):
+        """로켓 아이템: 트랙 중앙을 따라 자동으로 달린다"""
+        t = self.track
+        look = int(clamp((self.speed * 0.42 + 12.0) / t.ds, 5, 40))
+        i = (self.q.idx + look) % t.N
+        want = math.atan2(t.px[i] - self.x, t.pz[i] - self.z)
+        return clamp(-wrap_pi(want - self.heading) * 2.6, -1.0, 1.0)
+
+    def teleport(self, x, z, heading=None):
+        """순간이동 (속력은 유지). 진행도는 다음 update 에서 자연스럽게 반영된다."""
+        sp = max(0.0, self.vx * math.sin(self.heading) + self.vz * math.cos(self.heading))
+        self.x, self.z = x, z
+        if heading is not None:
+            self.heading = heading
+        self.vx = math.sin(self.heading) * sp
+        self.vz = math.cos(self.heading) * sp
+        self.track.query(x, z, -1, self.q)
+        self.hint = self.q.idx
+        self.y = self.q.y
+        self.drifting = False
+        self.drift_charge = 0.0
+        self.drift_tier = 0
 
     @property
     def lap(self):
@@ -1001,6 +1217,8 @@ class KartSim(object):
         self.drift_charge = 0.0
         self.drift_tier = 0
         self.boost_t = 0.0
+        self.cure()
+        self.hop_t = 0.0
         t.query(self.x, self.z, -1, q)
         self.y = q.y
         self.hint = q.idx
@@ -1013,23 +1231,59 @@ class KartSim(object):
         ev = self.events
         del ev[:]
         sin, cos, exp = math.sin, math.cos, math.exp
+        self._tick_fx(dt)
         fx = sin(self.heading)
         fz = cos(self.heading)
         rx = -fz
         rz = fx
         vf = self.vx * fx + self.vz * fz
         vl = self.vx * rx + self.vz * rz
+        # 입력 (상태이상이 있으면 바뀐다)
+        lost = self.spin_t > 0 or self.air_t > 0 or self.freeze_t > 0
+        if lost:
+            thr, brk, steer, dbtn = 0.0, 0.0, 0.0, False
+        elif self.auto_t > 0:
+            thr, brk, steer, dbtn = 1.0, 0.0, self._autopilot(), False
+        else:
+            thr, brk, steer, dbtn = inp['throttle'], inp['brake'], inp['steer'], inp['drift']
+            if self.rev_t > 0:
+                steer = -steer
+            if self.slide_t > 0:
+                steer = clamp(steer + sin(self.fx_time * 7.0) * 0.55, -1.0, 1.0)
+            if self.stun_t > 0:
+                thr = 0.0
+                dbtn = False
         boosting = self.boost_t > 0
         if boosting:
             self.boost_t -= dt
+            if self.boost_t <= 0:
+                self.boost_pow = 1.0
         maxs = s['max_speed']
-        cap = maxs * (0.55 if self.offroad else 1.0) + (24.0 if boosting else 0.0)
-        thr = inp['throttle']
-        brk = inp['brake']
-        steer = inp['steer']
+        air = self.air_y > 0.3
+        slow_off = self.offroad and not (self.grip_t > 0 or self.star_t > 0 or self.auto_t > 0 or air)
+        cap = maxs * (0.55 if slow_off else 1.0) + (24.0 * self.boost_pow if boosting else 0.0) + self.coins * 0.55
+        acc_k = 2.6 if boosting else 1.0
+        if self.engine_t > 0:
+            cap += self.engine_cap
+            acc_k *= self.engine_acc
+        if self.star_t > 0:
+            cap += 14.0
+            acc_k *= 1.6
+        if self.giant_t > 0:
+            cap += 5.0
+        if self.magnet_t > 0 and self.pull is not None:
+            cap += 9.0
+        if self.shrink_t > 0:
+            cap *= 0.72
+            acc_k *= 0.8
+        if self.slow_t > 0:
+            cap *= self.slow_k
+        if self.auto_t > 0:
+            cap = max(cap, maxs * self.auto_spd)
+            acc_k *= 3.0
         if thr > 0.01:
             if vf < cap:
-                vf += s['accel_rate'] * (2.6 if boosting else 1.0) * thr * (1 - 0.75 * max(0.0, vf) / cap) * dt
+                vf += s['accel_rate'] * acc_k * thr * (1 - 0.75 * max(0.0, vf) / cap) * dt
             else:
                 vf -= 26 * dt
         if brk > 0.01:
@@ -1039,13 +1293,22 @@ class KartSim(object):
                 vf = max(-16.0, vf - 16 * brk * dt)
         elif thr < 0.01:
             vf -= sign(vf) * min(abs(vf), 7 * dt)
-        vf *= exp(-(0.9 if self.offroad else 0.04) * dt)
+            if vf > cap + 1.0:
+                vf -= 26 * dt
+        vf *= exp(-(0.9 if slow_off else 0.04) * dt)
+        if lost:
+            if self.air_t > 0:
+                vf *= exp(-0.8 * dt)
+            elif self.freeze_t > 0:
+                vf *= exp(-0.35 * dt)
+            else:
+                vf *= exp(-2.6 * dt)
         along = self.vx * q.tx + self.vz * q.tz
         vf -= 4.4 * q.ty * (1.0 if along >= 0 else -1.0) * dt     # 오르막은 느려지고 내리막은 빨라짐
 
         # 드리프트
-        want = inp['drift'] and abs(steer) > 0.25 and vf > 22 and not self.offroad
-        if not inp['drift']:
+        want = dbtn and abs(steer) > 0.25 and vf > 22 and not self.offroad
+        if not dbtn:
             self.armed = True
         if not self.drifting and want and self.armed:
             self.armed = False
@@ -1054,7 +1317,7 @@ class KartSim(object):
             self.drift_charge = 0.0
             ev.append('driftStart')
         if self.drifting:
-            if (not inp['drift']) or vf < 16:
+            if (not dbtn) or vf < 16:
                 tier = self.drift_tier
                 if tier > 0:
                     self.boost_t = max(self.boost_t, DRIFT_BOOST[tier])
@@ -1070,15 +1333,22 @@ class KartSim(object):
                     ev.append('tier%d' % tier)
                 self.drift_tier = tier
 
-        # 조향
-        speed_f = clamp(abs(vf) / 14.0, 0.0, 1.0) * (1 - 0.3 * clamp(abs(vf) / maxs, 0.0, 1.0))
+        # 조향 (고속에서도 너무 둔해지지 않게)
+        turn = s['turn_rate'] * (1.2 if self.grip_t > 0 else 1.0) * (0.9 if self.giant_t > 0 else 1.0)
+        speed_f = clamp(abs(vf) / 14.0, 0.0, 1.0) * (1 - 0.22 * clamp(abs(vf) / maxs, 0.0, 1.0))
         if self.drifting:
-            yaw = s['turn_rate'] * (0.55 * self.drift_dir + 0.6 * steer * (0.75 if steer * self.drift_dir > 0 else 1.0)) * 1.15
+            yaw = turn * (0.55 * self.drift_dir + 0.6 * steer * (0.75 if steer * self.drift_dir > 0 else 1.0)) * 1.15
         else:
-            yaw = s['turn_rate'] * steer
+            yaw = turn * steer
         self.heading -= yaw * speed_f * (1.0 if vf >= 0 else -1.0) * dt
-        self.steer_vis += (steer - self.steer_vis) * min(1.0, dt * 10)
-        grip = s['drift_grip'] if self.drifting else (7.0 if boosting else 9.5)
+        self.steer_vis += (steer - self.steer_vis) * min(1.0, dt * 12)
+        grip = s['drift_grip'] if self.drifting else (9.5 if boosting else 12.0)
+        if self.freeze_t > 0:
+            grip = 0.5
+        elif self.slide_t > 0:
+            grip *= 0.22
+        elif self.grip_t > 0:
+            grip *= 1.25
         vl *= exp(-grip * dt)
         self.slip = vl
         nfx = sin(self.heading)
@@ -1087,21 +1357,26 @@ class KartSim(object):
         self.vz = nfz * vf + nfx * vl
         self.x += self.vx * dt
         self.z += self.vz * dt
+        if self.magnet_t > 0 and self.pull is not None:
+            self.x += self.pull[0] * 7.0 * dt
+            self.z += self.pull[1] * 7.0 * dt
 
-        # 다른 카트와 충돌 (원)
-        for o in others:
-            dx = self.x - o[0]
-            dz = self.z - o[1]
-            dist = math.hypot(dx, dz)
-            if 0.001 < dist < 2.5:
-                push = (2.5 - dist) / dist * 0.55
-                self.x += dx * push
-                self.z += dz * push
-                rel = (self.vx - o[2]) * dx / dist + (self.vz - o[3]) * dz / dist
-                if rel < 0:
-                    self.vx -= dx / dist * rel * 0.9
-                    self.vz -= dz / dist * rel * 0.9
-                    ev.append('bump')
+        # 다른 카트와 충돌 (원) - 유령 상태면 통과
+        if self.ghost_t <= 0:
+            rad = 2.5 * (1.5 if self.giant_t > 0 else (0.7 if self.shrink_t > 0 else 1.0))
+            for o in others:
+                dx = self.x - o[0]
+                dz = self.z - o[1]
+                dist = math.hypot(dx, dz)
+                if 0.001 < dist < rad:
+                    push = (rad - dist) / dist * (0.25 if self.giant_t > 0 else 0.55)
+                    self.x += dx * push
+                    self.z += dz * push
+                    rel = (self.vx - o[2]) * dx / dist + (self.vz - o[3]) * dz / dist
+                    if rel < 0:
+                        self.vx -= dx / dist * rel * 0.9
+                        self.vz -= dz / dist * rel * 0.9
+                        ev.append('bump')
 
         # 트랙 질의 + 벽
         t.query(self.x, self.z, self.hint, q)
@@ -1134,7 +1409,7 @@ class KartSim(object):
         # 부스트 패드
         if self.pad_cool > 0:
             self.pad_cool -= dt
-        elif t.pads:
+        elif t.pads and not air:
             N = t.N
             for p in t.pads:
                 di = q.prog - p['idx']
@@ -1189,6 +1464,7 @@ class BotBrain(object):
         self.phase = rand() * 6.28
         self.t = 0.0
         self.stuck = 0.0
+        self.react = 0.5 + rand() * 1.2       # 아이템을 받고 쓰기까지 머뭇거리는 시간
 
     def drive(self, kart, dt, player_total, rubber=True):
         tr = kart.track
@@ -1203,6 +1479,8 @@ class BotBrain(object):
         want = math.atan2(tx - kart.x, tz - kart.z)
         diff = wrap_pi(want - kart.heading)
         steer = clamp(-diff * 2.2, -1.0, 1.0)
+        if kart.blind_t > 0:                       # 시야가 가려지면 비틀거림
+            steer = clamp(steer + math.sin(self.t * 2.3 + self.phase) * 0.5, -1.0, 1.0)
         rb = 1.0
         if rubber and player_total is not None:
             gap = (kart.total - player_total) * tr.ds
@@ -1210,10 +1488,12 @@ class BotBrain(object):
         curve = tr.turn[q.idx]
         target = kart.stats['max_speed'] * self.skill * rb * (1 - clamp(curve * 0.55 - 0.08, 0.0, 0.5))
         sp = kart.speed
+        if kart.boost_t > 0 or kart.star_t > 0 or kart.engine_t > 0 or kart.auto_t > 0:
+            target += 30.0                          # 가속 아이템을 쓰는 중이면 감속하지 않음
         inp = {'steer': steer, 'throttle': 1.0 if sp < target else 0.15, 'brake': 0.7 if sp > target + 7 else 0.0, 'drift': False}
         if curve > 0.55 and sp > 36 and self.skill > 0.9 and abs(steer) > 0.45:
             inp['drift'] = True
-        if sp < 2:
+        if sp < 2 and kart.spin_t <= 0 and kart.freeze_t <= 0 and kart.air_t <= 0:
             self.stuck += dt
             if self.stuck > 2.5:
                 kart.respawn()
@@ -1224,7 +1504,7 @@ class BotBrain(object):
 
 
 # ----------------------------------------------------------------------------
-#  레이스 진행 (솔로/멀티 공통): 카운트다운, 시뮬레이션, 순위, 네트워크 동기화
+#  레이스 진행 (솔로/멀티 공통): 카운트다운, 시뮬레이션, 순위, 아이템전, 네트워크 동기화
 # ----------------------------------------------------------------------------
 class Racer(object):
     """레이스 참가자 한 명 (플레이어/봇/원격 플레이어). 렌더러는 이 객체의 값만 읽으면 된다."""
@@ -1257,9 +1537,19 @@ class Racer(object):
         self.idx = 0
         self.offroad = False
         self.wall_hit = 0.0
+        # ---- 아이템전 ----
+        self.items = [None, None, None]     # 슬롯 3칸 (키 1/2/3)
+        self.uses = [0, 0, 0]
+        self.roll = [0.0, 0.0, 0.0]         # 룰렛 남은 시간
+        self.hold = [0.0, 0.0, 0.0]         # 봇: 들고 있던 시간
+        self.fx = 0                         # 상태 비트 (FX_*)
+        self.spin_ang = 0.0
+        self.air_y = 0.0
+        self.scale = 1.0
 
     def sync_visual(self, track, dt):
         s = self.sim
+        k = min(1.0, dt * 7.0)
         if s is not None:
             self.x, self.y, self.z, self.h = s.x, s.y, s.z, s.heading
             self.speed = s.speed
@@ -1268,13 +1558,18 @@ class Racer(object):
             self.drifting = s.drifting
             self.tier = s.drift_tier
             self.drift_dir = s.drift_dir
-            self.boosting = s.boost_t > 0
+            self.boosting = s.boost_t > 0 or s.auto_t > 0
             self.steer = s.steer_vis
             self.slip = s.slip
             self.up = (s.upx, s.upy, s.upz)
             self.idx = s.q.idx
             self.offroad = s.offroad
             self.wall_hit = s.wall_hit
+            self.fx = s.fx_bits()
+            self.spin_ang = s.spin_ang
+            self.air_y = s.air_y
+            ts = 0.55 if s.shrink_t > 0 else (1.6 if s.giant_t > 0 else 1.0)
+            self.scale += (ts - self.scale) * k
             return
         c, t = self.cur, self.tgt
         f = 1.0 - math.exp(-14.0 * dt)
@@ -1292,17 +1587,24 @@ class Racer(object):
         self.vz = math.cos(self.h) * self.speed
         self.drifting = t['dr'] > 0
         self.tier = max(0, t['dr'] - 1)
-        self.boosting = t['bo'] > 0
+        fx = int(t.get('fx', 0) or 0)
+        self.fx = fx
+        self.boosting = t['bo'] > 0 or bool(fx & FX_AUTO)
         self.steer = clamp(-dh * 2.0, -1.0, 1.0)
         if self.drifting:
             self.drift_dir = sign(self.steer) or self.drift_dir
         self.slip = 0.0
         self.idx = int(round(self.total)) % track.N
         self.up = track.surface_normal(self.idx)
+        self.spin_ang = (self.spin_ang + dt * 14.0) if fx & FX_SPIN else 0.0
+        ta = 3.0 if fx & FX_AIR else (1.4 if fx & FX_HOP else 0.0)
+        self.air_y += (ta - self.air_y) * k
+        ts = 0.55 if fx & FX_SHRINK else (1.6 if fx & FX_GIANT else 1.0)
+        self.scale += (ts - self.scale) * k
 
 
 class Race(object):
-    def __init__(self, map_id, laps, entries, multi=False, is_host=True, countdown=5.0, net=None, auto_local=False):
+    def __init__(self, map_id, laps, entries, multi=False, is_host=True, countdown=5.0, net=None, auto_local=False, items=False):
         self.map_id = map_id
         self.track = Track(map_id)
         self.laps = laps
@@ -1320,7 +1622,7 @@ class Race(object):
             else:
                 p = self.track.spawn_pose(rc.slot)
                 rc.cur = dict(x=p['x'], y=p['y'], z=p['z'], h=p['heading'], sp=0.0, total=p['prog'])
-                rc.tgt = dict(rc.cur, dr=0, bo=0)
+                rc.tgt = dict(rc.cur, dr=0, bo=0, fx=0)
             if rc.kind == 'bot':
                 rc.brain = BotBrain(rnd)
             if rc.kind == 'local':
@@ -1336,16 +1638,20 @@ class Race(object):
         self.acc = 0.0
         self.last_count = 99
         self.last_lap = 1
-        self.events = []
+        self.events = []              # 지난 update 이후 일어난 일 (프론트엔드가 읽음)
+        self._pend = []
         self.finish_order = []
         self.send_t = 0.0
         self.auto_local = auto_local
         self.count_left = countdown
+        self.items = ItemSystem(self) if items else None
+
+    def ev(self, e):
+        self._pend.append(e)
 
     # ---- 진행 --------------------------------------------------------------
     def update(self, dt, inp):
         """프레임마다 호출. inp = {'steer','throttle','brake','drift'} (로컬 플레이어 입력)"""
-        self.events = []
         dt = min(dt, 0.1)
         if self.phase == 'count':
             left = self.start_at - time.monotonic()
@@ -1353,12 +1659,12 @@ class Race(object):
             if left <= 0:
                 self.phase = 'run'
                 self.t = 0.0
-                self.events.append(('go',))
+                self.ev(('go',))
             else:
                 n = int(math.ceil(left))
                 if n != self.last_count:
                     self.last_count = n
-                    self.events.append(('count', n))
+                    self.ev(('count', n))
         self.acc += dt
         steps = 0
         while self.acc >= STEP and steps < 6:
@@ -1370,19 +1676,21 @@ class Race(object):
         for rc in self.racers:
             rc.sync_visual(self.track, dt)
         self._net_tick(dt)
+        self.events, self._pend = self._pend, []
 
     def _step(self, dt, inp):
         running = self.phase == 'run'
         racers = self.racers
         N = self.track.N
-        others_all = [(r.x, r.z, r.vx, r.vz) for r in racers]
-        zero = {'steer': 0.0, 'throttle': 0.0, 'brake': 0.0, 'drift': False}
+        far = (1e9, 1e9, 0.0, 0.0)
+        others_all = [far if (r.fx & FX_GHOST) else (r.x, r.z, r.vx, r.vz) for r in racers]
+        items = self.items
         for k, rc in enumerate(racers):
             sim = rc.sim
             if sim is None:
                 continue
             if not running:
-                use = zero
+                use = NO_INPUT
             elif rc.kind == 'local' and not rc.finished and not self.auto_local:
                 use = inp
             else:
@@ -1390,13 +1698,18 @@ class Race(object):
                     rc.brain = BotBrain(Rng(5))
                 loc = self.local
                 use = rc.brain.drive(sim, dt, loc.total if loc is not None else None, not self.multi)
+                if items is not None and running:
+                    items.bot_think(rc, dt)
             if not running:
                 sim.vx *= 0.9
                 sim.vz *= 0.9
             others = others_all[:k] + others_all[k + 1:]
             sim.update(dt, use, others)
-            # 다음 서브스텝에서 쓸 위치 갱신
-            others_all[k] = (sim.x, sim.z, sim.vx, sim.vz)
+            # 다음 서브스텝/아이템 판정에서 쓸 위치 갱신
+            if not (rc.fx & FX_GHOST):
+                others_all[k] = (sim.x, sim.z, sim.vx, sim.vz)
+            rc.x, rc.y, rc.z, rc.h, rc.idx = sim.x, sim.y, sim.z, sim.heading, sim.q.idx
+            rc.vx, rc.vz, rc.speed, rc.air_y = sim.vx, sim.vz, sim.speed, sim.air_y
             rc.total = sim.total
             if running:
                 if not rc.finished and sim.total >= self.laps * N:
@@ -1405,22 +1718,30 @@ class Race(object):
                     sim.finished = True
                     self.finish_order.append(rc)
                     if rc.kind == 'local':
-                        self.events.append(('finish',))
+                        self.ev(('finish',))
                         if self.net is not None and self.multi:
                             self.net.send({'t': 'fin', 'time': round(rc.finish_time, 2)})
             if rc.kind == 'local':
                 for e in sim.events:
-                    self.events.append(('sim', e))
+                    self.ev(('sim', e))
                 lap = min(self.laps, sim.lap)
                 if lap > self.last_lap and running:
-                    self.events.append(('lap', lap, lap == self.laps))
+                    self.ev(('lap', lap, lap == self.laps))
                     self.last_lap = lap
+        if items is not None:
+            items.step(dt)
         if running:
             self.t += dt
 
     def respawn_local(self):
         if self.local is not None and self.local.sim is not None and self.phase == 'run':
             self.local.sim.respawn()
+
+    def use_item(self, slot, back=False):
+        """아이템전: 내 슬롯(0,1,2) 아이템 사용. back=True 면 (가능한 아이템은) 뒤로 던진다."""
+        if self.items is None or self.local is None or self.auto_local:
+            return False
+        return self.items.use(self.local, slot, back)
 
     def ranking(self):
         def key(r):
@@ -1441,14 +1762,16 @@ class Race(object):
         self.send_t = 0.0
         s = self.local.sim
         net.send({'t': 's', 'x': round(s.x, 2), 'y': round(s.y, 2), 'z': round(s.z, 2), 'h': round(s.heading, 3), 'sp': round(s.speed, 1),
-                  'tp': round(s.total, 2), 'dr': (s.drift_tier + 1) if s.drifting else 0, 'bo': 1 if s.boost_t > 0 else 0})
+                  'tp': round(s.total, 2), 'dr': (s.drift_tier + 1) if s.drifting else 0, 'bo': 1 if (s.boost_t > 0 or s.auto_t > 0) else 0,
+                  'fx': s.fx_bits()})
         if self.is_host:
             bots = []
             for rc in self.racers:
                 if rc.kind == 'bot':
                     b = rc.sim
                     bots.append([rc.id, round(b.x, 2), round(b.y, 2), round(b.z, 2), round(b.heading, 3), round(b.speed, 1), round(b.total, 2),
-                                 (b.drift_tier + 1) if b.drifting else 0, 1 if b.boost_t > 0 else 0, round(rc.finish_time, 2) if rc.finished else 0])
+                                 (b.drift_tier + 1) if b.drifting else 0, 1 if (b.boost_t > 0 or b.auto_t > 0) else 0,
+                                 round(rc.finish_time, 2) if rc.finished else 0, b.fx_bits()])
             if bots:
                 net.send({'t': 'b', 'b': bots})
 
@@ -1463,12 +1786,12 @@ class Race(object):
         if t == 's':
             rc = self._find(m.get('id'))
             if rc is not None and rc.tgt is not None:
-                rc.tgt.update(x=m['x'], y=m['y'], z=m['z'], h=m['h'], sp=m['sp'], total=m['tp'], dr=m['dr'], bo=m['bo'])
+                rc.tgt.update(x=m['x'], y=m['y'], z=m['z'], h=m['h'], sp=m['sp'], total=m['tp'], dr=m['dr'], bo=m['bo'], fx=m.get('fx', 0))
         elif t == 'b':
             for a in m.get('b', []):
                 rc = self._find(a[0])
                 if rc is not None and rc.tgt is not None:
-                    rc.tgt.update(x=a[1], y=a[2], z=a[3], h=a[4], sp=a[5], total=a[6], dr=a[7], bo=a[8])
+                    rc.tgt.update(x=a[1], y=a[2], z=a[3], h=a[4], sp=a[5], total=a[6], dr=a[7], bo=a[8], fx=a[10] if len(a) > 10 else 0)
                     if a[9] and not rc.finished:
                         rc.finished = True
                         rc.finish_time = a[9]
@@ -1477,12 +1800,14 @@ class Race(object):
             if rc is not None and not rc.finished:
                 rc.finished = True
                 rc.finish_time = float(m.get('time', self.t))
-                self.events.append(('fin', rc.name))
+                self.ev(('fin', rc.name))
         elif t == 'left':
             rc = self._find(m.get('id'))
             if rc is not None:
                 self.racers.remove(rc)
-                self.events.append(('left', rc.name))
+                self.ev(('left', rc.name))
+        elif isinstance(t, str) and t[:1] == 'i' and self.items is not None:
+            self.items.handle_message(m)
 
 
 def solo_entries(name, kart_id, bots, seed=None):
@@ -1575,6 +1900,7 @@ class RoomServer(object):
         self.map = 1
         self.laps = 3
         self.bots = 0
+        self.items = True             # 아이템전 여부
         self.state = 'lobby'
         self.next_id = 1
         self.running = False
@@ -1678,7 +2004,7 @@ class RoomServer(object):
 
     def _room_msg(self):
         with self.lock:
-            return {'t': 'room', 'host': self.host_id, 'map': self.map, 'laps': self.laps, 'bots': self.bots, 'state': self.state,
+            return {'t': 'room', 'host': self.host_id, 'map': self.map, 'laps': self.laps, 'bots': self.bots, 'items': self.items, 'state': self.state,
                     'players': [{'id': c.id, 'name': c.name, 'kart': c.kart} for c in self.conns.values()]}
 
     def _broadcast(self, obj, exclude=None):
@@ -1726,7 +2052,7 @@ class RoomServer(object):
             return
         if c.id is None:
             return
-        if t in ('s', 'b', 'fin'):
+        if t in ('s', 'b', 'fin') or (isinstance(t, str) and t[:1] == 'i'):     # 'i*' = 아이템전 메시지
             m['id'] = c.id
             self._broadcast(m, exclude=c.id)
         elif t == 'profile':
@@ -1741,6 +2067,8 @@ class RoomServer(object):
                     self.laps = int(clamp(int(m['laps']), 1, 10))
                 if 'bots' in m:
                     self.bots = int(clamp(int(m['bots']), 0, self.MAX_PLAYERS - 1))
+                if 'items' in m:
+                    self.items = bool(m['items'])
                 self._broadcast(self._room_msg())
         elif t == 'start':
             if self.host_id == c.id and self.state == 'lobby':
@@ -1754,7 +2082,7 @@ class RoomServer(object):
                     bots = []
                     for i in range(min(self.bots, self.MAX_PLAYERS - len(order))):
                         bots.append({'id': 'b%d' % (i + 1), 'name': 'BOT %d' % (i + 1), 'kart': random.randrange(KART_COUNT), 'slot': len(order) + i})
-                    msg = {'t': 'start', 'map': self.map, 'laps': self.laps, 'countdown': 5.0, 'players': order, 'bots': bots}
+                    msg = {'t': 'start', 'map': self.map, 'laps': self.laps, 'countdown': 5.0, 'players': order, 'bots': bots, 'items': self.items}
                 self._broadcast(msg)
         elif t == 'lobby':
             if self.host_id == c.id:
@@ -1924,7 +2252,7 @@ class Session(object):
         self.my_id = None
         self.host_id = None
         self.players = []
-        self.settings = {'map': 1, 'laps': 3, 'bots': 0}
+        self.settings = {'map': 1, 'laps': 3, 'bots': 0, 'items': True}
         self.start_msg = None
         self.address = ''
         self._joined = False
@@ -1939,6 +2267,7 @@ class Session(object):
             self.server = RoomServer(port, name=self.profile.display_name()).start()
             self.server.map = int(self.profile['map'])
             self.server.laps = int(self.profile['laps'])
+            self.server.items = self.profile['mode'] == 'item'
         except Exception as e:
             self.server = None
             self.error = 'server: %s' % e
@@ -1979,7 +2308,7 @@ class Session(object):
             elif t == 'room':
                 self.host_id = m.get('host')
                 self.players = m.get('players', [])
-                self.settings = {'map': m.get('map', 1), 'laps': m.get('laps', 3), 'bots': m.get('bots', 0)}
+                self.settings = {'map': m.get('map', 1), 'laps': m.get('laps', 3), 'bots': m.get('bots', 0), 'items': bool(m.get('items', False))}
                 if self.state in ('connecting', 'idle'):
                     self.state = 'lobby'
             elif t == 'start':
@@ -2061,7 +2390,8 @@ def serve_forever(port=DEFAULT_PORT):
 # ----------------------------------------------------------------------------
 class Profile(dict):
     DEFAULTS = {'name': '', 'kart': None, 'map': 1, 'laps': 3, 'bots': 7, 'quality': 1, 'auto_gas': True, 'sound': True,
-                'lang': 'auto', 'last_ip': '', 'port': DEFAULT_PORT, 'steer_mode': 'buttons', 'steer_resp': 1}
+                'lang': 'auto', 'last_ip': '', 'port': DEFAULT_PORT, 'steer_mode': 'buttons', 'steer_resp': 1,
+                'mode': 'item'}           # 'item' = 아이템전, 'speed' = 스피드전
 
     def __init__(self, filename='kart3d_profile.json'):
         dict.__init__(self)
@@ -2237,7 +2567,7 @@ class ChaseCam(object):
         if self.h is None:
             self.h = rc.h
             self.y = rc.y
-        self.h += wrap_pi(target - self.h) * (1 - math.exp(-5.5 * dt))
+        self.h += wrap_pi(target - self.h) * (1 - math.exp(-7.0 * dt))
         self.y += (rc.y - self.y) * (1 - math.exp(-9.0 * dt))
         dist = 8.3 + sr * 2.2 + (1.6 if rc.boosting else 0.0)
         hgt = 3.5 + sr * 0.4
@@ -2247,6 +2577,1358 @@ class ChaseCam(object):
         yaw = math.atan2(lx - x, lz - z)
         pitch = math.atan2(y - ly, math.hypot(lx - x, lz - z))
         return x, y, z, yaw, pitch
+
+
+# ----------------------------------------------------------------------------
+#  아이템전: 아이템 100종 · 아이템 상자 · 슬롯 3칸(키 1/2/3) · 투사체/함정 · 봇 · 네트워크 동기화
+#  등급 0 = 흔함/방어용(선두에게 잘 나옴) ... 3 = 강력함(꼴찌에게 잘 나옴)
+# ----------------------------------------------------------------------------
+ITEM_SLOTS = 3
+
+_IT = [
+    # (키, 한글, 영문, 종류, 등급, 사용 횟수, 아이콘, 색1, 색2, 매개변수)
+    # ---- 가속 (10) ----
+    ('booster', '부스터', 'Booster', 'boost', 0, 1, 'flame', 0xff8a1a, 0xffe066, {'dur': 1.6, 'pow': 1.0}),
+    ('booster3', '트리플 부스터', 'Triple Booster', 'boost', 1, 3, 'flame', 0xff4a1a, 0xffd23a, {'dur': 1.4, 'pow': 1.0}),
+    ('goldbooster', '황금 부스터', 'Golden Booster', 'boost', 2, 7, 'flame', 0xffcc00, 0xfff4b0, {'dur': 1.0, 'pow': 1.05}),
+    ('nitro', '니트로', 'Nitro', 'boost', 1, 1, 'canister', 0x29a3ff, 0xe8f6ff, {'dur': 2.6, 'pow': 1.15}),
+    ('supernitro', '슈퍼 니트로', 'Super Nitro', 'boost', 2, 2, 'canister', 0x9b5bff, 0xe4d8ff, {'dur': 2.6, 'pow': 1.25}),
+    ('jetengine', '제트 엔진', 'Jet Engine', 'boost', 1, 1, 'flame', 0x3ad0ff, 0xd8f6ff, {'dur': 3.2, 'pow': 0.85}),
+    ('turbocan', '터보 캔', 'Turbo Can', 'boost', 0, 2, 'canister', 0x2ecc71, 0xeafff0, {'dur': 1.0, 'pow': 0.9}),
+    ('afterburner', '애프터버너', 'Afterburner', 'boost', 2, 1, 'flame', 0xff3d3d, 0xffb199, {'dur': 4.0, 'pow': 1.1}),
+    ('sugarrush', '슈가 러시', 'Sugar Rush', 'boost', 1, 4, 'candy', 0xff5fa8, 0xffffff, {'dur': 0.8, 'pow': 1.0}),
+    ('chili', '불꽃 고추', 'Fire Chili', 'boost', 1, 1, 'chili', 0xe8261c, 0x3db846, {'dur': 2.2, 'pow': 1.3}),
+    # ---- 엔진 강화 (3) ----
+    ('v8', 'V8 엔진', 'V8 Engine', 'engine', 1, 1, 'gear', 0xa8b2c4, 0xffb020, {'dur': 6.0, 'cap': 9.0, 'acc': 1.4}),
+    ('slipstream', '슬립스트림', 'Slipstream', 'engine', 0, 1, 'wind', 0x8ee3ff, 0xffffff, {'dur': 5.0, 'cap': 6.0, 'acc': 1.25}),
+    ('hyperdrive', '하이퍼드라이브', 'Hyperdrive', 'engine', 2, 1, 'gear', 0x19e6ff, 0x2a3c9b, {'dur': 7.0, 'cap': 13.0, 'acc': 1.6}),
+    # ---- 무적 (3) ----
+    ('star', '무적 스타', 'Super Star', 'star', 2, 1, 'star', 0xffd400, 0xfff6a0, {'dur': 7.0}),
+    ('rainbowstar', '무지개 스타', 'Rainbow Star', 'star', 3, 1, 'star', 0xff4fd8, 0x6af0ff, {'dur': 10.0}),
+    ('ministar', '미니 스타', 'Mini Star', 'star', 1, 1, 'star', 0xffa94d, 0xffffff, {'dur': 3.5}),
+    # ---- 방어 (5) ----
+    ('shield', '방패', 'Shield', 'shield', 0, 1, 'shield', 0x3d8bff, 0xd6e8ff, {'n': 1, 'dur': 15.0}),
+    ('steelshield', '강철 방패', 'Steel Shield', 'shield', 1, 1, 'shield', 0x9aa4b6, 0xf0f3f8, {'n': 2, 'dur': 20.0}),
+    ('bubble', '버블 쉴드', 'Bubble Shield', 'shield', 0, 1, 'bubble', 0x7fdcff, 0xe8fbff, {'n': 1, 'dur': 10.0}),
+    ('bubble3', '트리플 버블', 'Triple Bubble', 'shield', 1, 1, 'bubble', 0xb08bff, 0xf0e8ff, {'n': 3, 'dur': 25.0}),
+    ('aegis', '이지스', 'Aegis', 'shield', 2, 1, 'shield', 0xffcc33, 0xfff3c4, {'n': 4, 'dur': 30.0}),
+    # ---- 유령 (2) ----
+    ('ghost', '유령', 'Ghost', 'ghost', 2, 1, 'ghost', 0xe8ecff, 0x6b5bd6, {'dur': 5.0, 'steal': 1}),
+    ('phantom', '팬텀', 'Phantom', 'ghost', 1, 1, 'ghost', 0xb7f5d8, 0x1f8f6a, {'dur': 3.5, 'steal': 0}),
+    # ---- 자동 질주 (3) ----
+    ('rocket', '로켓', 'Rocket', 'rocket', 3, 1, 'rocket', 0xe04040, 0xf2f2f2, {'dur': 5.5, 'spd': 1.45}),
+    ('bullettrain', '탄환 열차', 'Bullet Train', 'rocket', 3, 1, 'rocket', 0x3a3f4c, 0xffd400, {'dur': 8.0, 'spd': 1.5}),
+    ('comet', '혜성', 'Comet', 'rocket', 2, 1, 'rocket', 0x6ad7ff, 0xffffff, {'dur': 3.5, 'spd': 1.4}),
+    # ---- 점프 (3) ----
+    ('spring', '스프링', 'Spring', 'hop', 0, 1, 'spring', 0x4fd66b, 0xe6ffe9, {'air': 0.8, 'boost': 0.6}),
+    ('spring3', '트리플 스프링', 'Triple Spring', 'hop', 0, 3, 'spring', 0xffa43a, 0xfff1e0, {'air': 0.7, 'boost': 0.5}),
+    ('superjump', '슈퍼 점프', 'Super Jump', 'hop', 1, 1, 'spring', 0x3a7bff, 0xffffff, {'air': 1.5, 'boost': 1.6}),
+    # ---- 자석 (2) ----
+    ('magnet', '자석', 'Magnet', 'magnet', 1, 1, 'magnet', 0xe8261c, 0xdfe3ea, {'dur': 6.0, 'range': 80.0}),
+    ('supermagnet', '슈퍼 자석', 'Super Magnet', 'magnet', 2, 1, 'magnet', 0x9b5bff, 0xdfe3ea, {'dur': 9.0, 'range': 140.0}),
+    # ---- 회복 (2) ----
+    ('repair', '수리 키트', 'Repair Kit', 'cleanse', 0, 1, 'wrench', 0xb4bccb, 0xff8a1a, {'immune': 1.5}),
+    ('potion', '회복 물약', 'Potion', 'cleanse', 0, 1, 'potion', 0xff4f7a, 0xffd0dc, {'immune': 3.0}),
+    # ---- 타이어 (2) ----
+    ('offroad', '오프로드 타이어', 'Offroad Tires', 'grip', 0, 1, 'tire', 0x4a4e58, 0xffb020, {'dur': 8.0}),
+    ('spiketires', '스파이크 타이어', 'Spiked Tires', 'grip', 1, 1, 'tire', 0x4a4e58, 0x19e6ff, {'dur': 12.0}),
+    # ---- 워프 (3) ----
+    ('warp', '워프', 'Warp', 'warp', 2, 1, 'portal', 0x9b5bff, 0x19e6ff, {'dist': 60.0}),
+    ('hyperwarp', '하이퍼 워프', 'Hyper Warp', 'warp', 3, 1, 'portal', 0xff3dbb, 0xffd400, {'dist': 130.0}),
+    ('blink', '순간이동', 'Blink', 'warp', 1, 1, 'portal', 0x2ee6a8, 0xffffff, {'dist': 30.0}),
+    # ---- 거대화 (2) ----
+    ('megamushroom', '거대 버섯', 'Mega Mushroom', 'giant', 2, 1, 'mushroom', 0xe8261c, 0xffffff, {'dur': 8.0}),
+    ('titan', '타이탄 모드', 'Titan Mode', 'giant', 3, 1, 'mushroom', 0x7a5bff, 0xffd400, {'dur': 11.0}),
+    # ---- 코인 (3) ----
+    ('coin', '코인', 'Coin', 'coin', 0, 1, 'coin', 0xffcc00, 0xfff2a8, {'n': 1}),
+    ('coinbag', '코인 주머니', 'Coin Bag', 'coin', 0, 1, 'bag', 0xc98a3a, 0xffcc00, {'n': 3}),
+    ('treasure', '보물 상자', 'Treasure Chest', 'coin', 1, 1, 'chest', 0xa8642e, 0xffcc00, {'n': 6}),
+    # ---- 행운 (2) ----
+    ('dice', '행운의 주사위', 'Lucky Dice', 'lucky', 0, 1, 'dice', 0xffffff, 0xe8261c, {'min': 1}),
+    ('clover', '네잎클로버', 'Four-Leaf Clover', 'lucky', 1, 1, 'clover', 0x2ecc71, 0xc8ffd8, {'min': 2}),
+    # ---- 자리 교환 / 도둑 (3) ----
+    ('swap', '자리 바꾸기', 'Position Swap', 'swap', 3, 1, 'swap', 0x19b6ff, 0xffd400, {'range': 160.0}),
+    ('thief', '도둑 장갑', 'Thief Glove', 'steal', 1, 1, 'hand', 0x8a7bff, 0xffffff, {'n': 1}),
+    ('superthief', '슈퍼 도둑 장갑', 'Super Thief Glove', 'steal', 2, 1, 'hand', 0xff8a1a, 0xfff1e0, {'n': 2}),
+    # ---- 직선 발사 (12) ----  (브레이크를 누른 채 쓰면 뒤로 던짐)
+    ('missile', '미사일', 'Missile', 'shot', 0, 1, 'missile', 0x36c24a, 0xffffff, {'spd': 60.0, 'life': 6.0, 'bounce': 4, 'n': 1, 'fx': 'spin', 'r': 1.2}),
+    ('missile3', '트리플 미사일', 'Triple Missile', 'shot', 1, 3, 'missile', 0x1f9e3a, 0xffd400, {'spd': 60.0, 'life': 6.0, 'bounce': 4, 'n': 1, 'fx': 'spin', 'r': 1.2}),
+    ('spread', '부채꼴 미사일', 'Spread Missiles', 'shot', 1, 1, 'missile', 0x2bd6c4, 0xffffff, {'spd': 55.0, 'life': 4.0, 'bounce': 1, 'n': 3, 'fx': 'spin', 'r': 1.1}),
+    ('cannonball', '대포알', 'Cannonball', 'shot', 1, 1, 'ball', 0x3a3f4c, 0x9aa4b6, {'spd': 45.0, 'life': 5.0, 'bounce': 0, 'n': 1, 'fx': 'launch', 'r': 1.8}),
+    ('snowball', '눈덩이', 'Snowball', 'shot', 0, 2, 'ball', 0xf2f8ff, 0x8ecbff, {'spd': 50.0, 'life': 4.0, 'bounce': 1, 'n': 1, 'fx': 'slow', 'fxd': 3.0, 'k': 0.6, 'r': 1.3}),
+    ('icearrow', '얼음 화살', 'Ice Arrow', 'shot', 1, 1, 'arrow', 0x8ee3ff, 0xffffff, {'spd': 90.0, 'life': 3.0, 'bounce': 0, 'n': 1, 'fx': 'freeze', 'fxd': 1.6, 'r': 1.1}),
+    ('laser', '레이저', 'Laser Beam', 'shot', 1, 1, 'laser', 0xff2bd6, 0xffffff, {'spd': 230.0, 'life': 0.8, 'bounce': 0, 'n': 1, 'fx': 'spin', 'r': 1.4}),
+    ('plasma', '플라스마 볼', 'Plasma Ball', 'shot', 2, 1, 'ball', 0x19e6ff, 0xffffff, {'spd': 70.0, 'life': 6.0, 'bounce': 6, 'n': 1, 'fx': 'stun', 'fxd': 2.2, 'r': 1.6}),
+    ('waterballoon', '물풍선', 'Water Balloon', 'shot', 0, 1, 'balloon', 0x3d8bff, 0xbfe0ff, {'spd': 40.0, 'life': 3.0, 'bounce': 0, 'n': 1, 'fx': 'slide', 'fxd': 2.0, 'r': 1.6}),
+    ('pie', '크림 파이', 'Cream Pie', 'shot', 0, 1, 'pie', 0xf7e6c4, 0xff5fa8, {'spd': 45.0, 'life': 3.0, 'bounce': 0, 'n': 1, 'fx': 'blind', 'fxd': 3.5, 'r': 1.4}),
+    ('boomerang', '부메랑', 'Boomerang', 'boomerang', 1, 3, 'boomerang', 0xffa43a, 0x8a4a1a, {'spd': 50.0, 'life': 4.0, 'out': 1.3, 'fx': 'spin', 'r': 1.4}),
+    ('shuriken', '수리검', 'Shuriken', 'shot', 1, 3, 'shuriken', 0xb4bccb, 0x3a3f4c, {'spd': 95.0, 'life': 2.5, 'bounce': 2, 'n': 1, 'fx': 'spin', 'r': 1.0}),
+    # ---- 유도 (5) ----
+    ('homing', '유도 미사일', 'Homing Missile', 'homing', 1, 1, 'target', 0xe8261c, 0xffffff, {'spd': 128.0, 'life': 9.0, 'fx': 'spin', 'r': 1.3}),
+    ('homing3', '트리플 유도 미사일', 'Triple Homing', 'homing', 2, 3, 'target', 0xc0141e, 0xffd400, {'spd': 124.0, 'life': 9.0, 'fx': 'spin', 'r': 1.3}),
+    ('bees', '꿀벌 떼', 'Bee Swarm', 'homing', 2, 1, 'bee', 0xffcc00, 0x2b2f3a, {'spd': 112.0, 'life': 10.0, 'fx': 'slow', 'fxd': 3.0, 'k': 0.55, 'r': 1.8}),
+    ('drone', '추적 드론', 'Hunter Drone', 'homing', 2, 1, 'drone', 0xa8b2c4, 0x19e6ff, {'spd': 132.0, 'life': 12.0, 'fx': 'stun', 'fxd': 2.0, 'r': 1.4}),
+    ('firebird', '불새', 'Firebird', 'homing', 2, 1, 'bird', 0xff5a1a, 0xffd400, {'spd': 138.0, 'life': 10.0, 'fx': 'launch', 'r': 1.6}),
+    # ---- 1등 추적 (2) ----
+    ('seeker', '1등 추적 미사일', 'Leader Seeker', 'seeker', 3, 1, 'wing', 0x2b5bff, 0xffffff, {'spd': 150.0, 'life': 30.0, 'fx': 'launch', 'r': 9.0}),
+    ('skyhammer', '스카이 해머', 'Sky Hammer', 'seeker', 3, 1, 'hammer', 0xa8b2c4, 0xffd400, {'spd': 140.0, 'life': 30.0, 'fx': 'flat', 'fxd': 4.0, 'r': 7.0}),
+    # ---- 폭탄 (6) ----
+    ('bomb', '폭탄', 'Bomb', 'bomb', 1, 1, 'bomb', 0x2b2f3a, 0xff5a1a, {'dist': 32.0, 'fuse': 1.2, 'n': 1, 'fx': 'launch', 'r': 8.0}),
+    ('megabomb', '메가 폭탄', 'Mega Bomb', 'bomb', 2, 1, 'bomb', 0xb5121b, 0xffd400, {'dist': 40.0, 'fuse': 1.6, 'n': 1, 'fx': 'launch', 'r': 14.0}),
+    ('stinkbomb', '방귀 폭탄', 'Stink Bomb', 'bomb', 0, 1, 'bomb', 0x7fbf3a, 0xd8ff9a, {'dist': 28.0, 'fuse': 1.0, 'n': 1, 'fx': 'slow', 'fxd': 3.5, 'k': 0.6, 'r': 9.0}),
+    ('inkbomb', '먹물 폭탄', 'Ink Bomb', 'bomb', 1, 1, 'bomb', 0x1b1b2a, 0x9b5bff, {'dist': 30.0, 'fuse': 1.0, 'n': 1, 'fx': 'blind', 'fxd': 4.0, 'r': 10.0}),
+    ('clusterbomb', '집속탄', 'Cluster Bomb', 'bomb', 2, 1, 'bomb', 0x5a6b3a, 0xffcc00, {'dist': 34.0, 'fuse': 1.3, 'n': 3, 'fx': 'launch', 'r': 7.0}),
+    ('freezebomb', '냉동 폭탄', 'Freeze Bomb', 'bomb', 2, 1, 'bomb', 0x8ee3ff, 0xffffff, {'dist': 32.0, 'fuse': 1.2, 'n': 1, 'fx': 'freeze', 'fxd': 2.0, 'r': 10.0}),
+    # ---- 회오리 (3) ----
+    ('tornado', '토네이도', 'Tornado', 'tornado', 2, 1, 'tornado', 0xc8d0e0, 0xffffff, {'spd': 95.0, 'life': 9.0, 'fx': 'spin', 'r': 3.2}),
+    ('sandstorm', '모래 폭풍', 'Sandstorm', 'tornado', 1, 1, 'tornado', 0xd9b36b, 0xfff1d0, {'spd': 90.0, 'life': 10.0, 'fx': 'blind', 'fxd': 2.5, 'r': 4.0}),
+    ('blizzard', '눈보라', 'Blizzard', 'tornado', 2, 1, 'snow', 0xdff3ff, 0x6ab8ff, {'spd': 92.0, 'life': 9.0, 'fx': 'freeze', 'fxd': 1.4, 'r': 4.5}),
+    # ---- 충격파: 내 주변 (4) ----
+    ('emp', 'EMP', 'EMP Blast', 'wave', 1, 1, 'wave', 0x19e6ff, 0x2a3c9b, {'r': 22.0, 'fx': 'stun', 'fxd': 2.2}),
+    ('shockwave', '충격파', 'Shockwave', 'wave', 1, 1, 'wave', 0xffcc33, 0xffffff, {'r': 16.0, 'fx': 'spin'}),
+    ('frostnova', '서리 폭발', 'Frost Nova', 'wave', 2, 1, 'snow', 0x8ee3ff, 0xffffff, {'r': 20.0, 'fx': 'freeze', 'fxd': 1.8}),
+    ('sonicboom', '소닉 붐', 'Sonic Boom', 'wave', 2, 1, 'wave', 0xff5fa8, 0xffffff, {'r': 28.0, 'fx': 'launch', 'boost': 1.0}),
+    # ---- 광역 (8) ----
+    ('lightning', '번개', 'Lightning', 'zap', 3, 1, 'bolt', 0xffd400, 0xffffff, {'scope': 'all', 'fx': 'shrink', 'fxd': 6.0}),
+    ('thundercloud', '먹구름', 'Thundercloud', 'zap', 2, 1, 'cloud', 0x6a7488, 0xffd400, {'scope': 'ahead1', 'fx': 'shrink', 'fxd': 5.0}),
+    ('chainlightning', '연쇄 번개', 'Chain Lightning', 'zap', 2, 1, 'bolt', 0x7fdcff, 0xffffff, {'scope': 'ahead3', 'fx': 'shrink', 'fxd': 3.5}),
+    ('inksquid', '먹물 오징어', 'Ink Squid', 'zap', 1, 1, 'squid', 0x9097b4, 0xe8ecff, {'scope': 'ahead', 'fx': 'blind', 'fxd': 4.5}),
+    ('confusion', '혼란의 주문', 'Confusion Spell', 'zap', 2, 1, 'swirl', 0xb04bff, 0xffffff, {'scope': 'ahead', 'fx': 'reverse', 'fxd': 4.0}),
+    ('lullaby', '자장가', 'Lullaby', 'zap', 2, 1, 'note', 0x6ab8ff, 0xffffff, {'scope': 'top3', 'fx': 'stun', 'fxd': 2.5}),
+    ('meteor', '메테오', 'Meteor Shower', 'meteor', 3, 1, 'meteor', 0xff5a1a, 0x6a4a3a, {'n': 3, 'fall': 1.6, 'fx': 'launch', 'r': 5.0}),
+    ('gravity', '중력 장치', 'Gravity Well', 'zap', 2, 1, 'ball', 0x4a3b8b, 0xc07bff, {'scope': 'ahead', 'fx': 'slow', 'fxd': 4.0, 'k': 0.55}),
+    # ---- 함정: 뒤에 설치 (12) ----
+    ('banana', '바나나', 'Banana', 'trap', 0, 1, 'banana', 0xffd400, 0x6b4a1a, {'shape': 'banana', 'fx': 'spin', 'r': 1.2, 'life': 60.0}),
+    ('banana3', '트리플 바나나', 'Triple Banana', 'trap', 0, 3, 'banana', 0xffe14d, 0x3db846, {'shape': 'banana', 'fx': 'spin', 'r': 1.2, 'life': 60.0}),
+    ('giantbanana', '대왕 바나나', 'Giant Banana', 'trap', 1, 1, 'banana', 0xffb800, 0xffffff, {'shape': 'banana', 'fx': 'spin', 'fxd': 1.8, 'r': 2.6, 'life': 60.0, 'big': 1}),
+    ('oil', '기름 웅덩이', 'Oil Slick', 'trap', 0, 1, 'drop', 0x5c5677, 0x9b5bff, {'shape': 'oil', 'fx': 'slide', 'fxd': 2.2, 'r': 3.0, 'life': 14.0, 'persist': 1}),
+    ('fakebox', '가짜 아이템 상자', 'Fake Item Box', 'trap', 0, 1, 'box', 0xe8261c, 0xffd400, {'shape': 'fakebox', 'fx': 'launch', 'r': 1.4, 'life': 60.0}),
+    ('tacks', '압정', 'Tack Strip', 'trap', 0, 1, 'spikes', 0xb4bccb, 0x3a3f4c, {'shape': 'spikes', 'fx': 'slow', 'fxd': 3.0, 'k': 0.55, 'r': 2.4, 'life': 40.0}),
+    ('mine', '지뢰', 'Land Mine', 'trap', 1, 1, 'mine', 0x5a6b3a, 0xe8261c, {'shape': 'mine', 'fx': 'launch', 'r': 3.2, 'blast': 7.0, 'life': 60.0}),
+    ('glue', '끈끈이', 'Glue Puddle', 'trap', 0, 1, 'glue', 0xb04bff, 0xead6ff, {'shape': 'glue', 'fx': 'slow', 'fxd': 0.8, 'k': 0.45, 'r': 3.4, 'life': 12.0, 'persist': 1}),
+    ('icepatch', '빙판', 'Ice Patch', 'trap', 0, 1, 'ice', 0xbfefff, 0xffffff, {'shape': 'ice', 'fx': 'slide', 'fxd': 1.8, 'r': 3.6, 'life': 14.0, 'persist': 1}),
+    ('barricade', '바리케이드', 'Barricade', 'trap', 1, 1, 'wall', 0xff8a1a, 0xffffff, {'shape': 'wall', 'fx': 'bump', 'r': 2.2, 'life': 40.0}),
+    ('reverseportal', '역방향 포털', 'Reverse Portal', 'trap', 1, 1, 'portal', 0xff3d3d, 0x3a3f4c, {'shape': 'portal', 'fx': 'warpback', 'fxd': 45.0, 'r': 1.8, 'life': 40.0}),
+    ('minefield', '지뢰밭', 'Minefield', 'trap', 2, 1, 'mine', 0x4a4e58, 0xffcc00, {'shape': 'mine', 'fx': 'launch', 'r': 3.0, 'blast': 6.0, 'life': 45.0, 'n': 5}),
+]
+ITEMS = [dict(id=i, key=a[0], name=a[1], en=a[2], kind=a[3], tier=a[4], uses=a[5], icon=a[6], c1=hex_rgb(a[7]), c2=hex_rgb(a[8]), p=a[9])
+         for i, a in enumerate(_IT)]
+ITEM_COUNT = len(ITEMS)
+ITEM_BY_KEY = dict((it['key'], it['id']) for it in ITEMS)
+_TIER_N = [sum(1 for it in ITEMS if it['tier'] == t) for t in range(4)]
+
+FX_NAMES = {'spin': ('스핀', 'spin'), 'launch': ('날려버림', 'launch'), 'shrink': ('축소', 'shrink'), 'flat': ('납작', 'flatten'),
+            'slow': ('감속', 'slow'), 'slide': ('미끄러짐', 'slide'), 'freeze': ('빙결', 'freeze'), 'stun': ('엔진 정지', 'stun'),
+            'reverse': ('조작 반전', 'reverse'), 'blind': ('시야 가림', 'blind'), 'bump': ('충돌', 'bump'), 'warpback': ('뒤로 이동', 'warp back'),
+            'swap': ('자리 바뀜', 'swapped')}
+_SCOPE = {'all': ('모든 상대', 'everyone'), 'ahead': ('앞의 모든 카트', 'all karts ahead'), 'ahead1': ('바로 앞 카트', 'the kart ahead'),
+          'ahead3': ('앞의 3대', '3 karts ahead'), 'top3': ('1~3등', 'the top 3')}
+
+
+def item_name(it, lang='ko'):
+    i = ITEMS[it]
+    return i['name'] if lang == 'ko' else i['en']
+
+
+def fx_name(fx, lang='ko'):
+    n = FX_NAMES.get(fx, (fx, fx))
+    return n[0] if lang == 'ko' else n[1]
+
+
+def item_desc(it, lang='ko'):
+    i = ITEMS[it]
+    k, p = i['kind'], i['p']
+    ko = lang == 'ko'
+    f = fx_name(p.get('fx', ''), lang)
+    if k == 'boost':
+        d = ('%g초 가속' % p['dur'], '%gs speed boost' % p['dur'])
+    elif k == 'engine':
+        d = ('%g초 엔진 강화 (최고속도 +%d)' % (p['dur'], p['cap']), '%gs engine power-up (+%d top speed)' % (p['dur'], p['cap']))
+    elif k == 'star':
+        d = ('%g초 무적 + 가속' % p['dur'], '%gs invincible + speed' % p['dur'])
+    elif k == 'shield':
+        d = ('공격 %d회 막기 (%g초)' % (p['n'], p['dur']), 'blocks %d hit(s) (%gs)' % (p['n'], p['dur']))
+    elif k == 'ghost':
+        d = ('%g초 투명' % p['dur'] + (' + 앞 차 아이템 훔치기' if p.get('steal') else ''), '%gs intangible' % p['dur'] + (' + steal' if p.get('steal') else ''))
+    elif k == 'rocket':
+        d = ('%g초 자동 질주 (무적, 속도 x%g)' % (p['dur'], p['spd']), '%gs autopilot (invincible, x%g speed)' % (p['dur'], p['spd']))
+    elif k == 'hop':
+        d = ('점프 %g초 (함정 회피) + 부스트' % p['air'], '%gs jump over traps + boost' % p['air'])
+    elif k == 'magnet':
+        d = ('%g초 동안 앞 차(%dm 안)에게 끌려감' % (p['dur'], p['range']), '%gs pull to the kart ahead (%dm)' % (p['dur'], p['range']))
+    elif k == 'cleanse':
+        d = ('상태이상 해제 + %g초 무적' % p['immune'], 'cure + %gs immunity' % p['immune'])
+    elif k == 'grip':
+        d = ('%g초 잔디 감속 없음 + 핸들링 향상' % p['dur'], '%gs no offroad slowdown + grip' % p['dur'])
+    elif k == 'warp':
+        d = ('%dm 앞으로 순간이동' % p['dist'], 'teleport %dm ahead' % p['dist'])
+    elif k == 'giant':
+        d = ('%g초 거대화 (부딪힌 차는 납작)' % p['dur'], '%gs giant (flattens karts)' % p['dur'])
+    elif k == 'coin':
+        d = ('코인 +%d (최고속도 상승)' % p['n'], '+%d coin(s), top speed up' % p['n'])
+    elif k == 'lucky':
+        d = ('더 좋은 아이템으로 변신', 'turns into a better item')
+    elif k == 'swap':
+        d = ('바로 앞 차와 자리 교환', 'swap places with the kart ahead')
+    elif k == 'steal':
+        d = ('앞 차 아이템 훔치기' + (' (%d대)' % p['n'] if p['n'] > 1 else ''), 'steal items ahead')
+    elif k in ('shot', 'boomerang'):
+        ko_, en_ = [], []
+        if p.get('n', 1) > 1:
+            ko_.append('%d갈래' % p['n'])
+            en_.append('%d-way' % p['n'])
+        if p['spd'] >= 200:
+            ko_.append('초고속')
+            en_.append('hyper-fast')
+        if k == 'boomerang':
+            ko_.append('던지면 돌아오는 부메랑')
+            en_.append('returning throw')
+        else:
+            ko_.append('발사')
+            en_.append('shot')
+        if p.get('bounce'):
+            ko_.append('(벽 %d번 튕김)' % p['bounce'])
+            en_.append('(%d wall bounces)' % p['bounce'])
+        d = (' '.join(ko_) + ' → ' + f, ' '.join(en_) + ' → ' + f)
+    elif k == 'homing':
+        wide = p['r'] >= 1.6
+        d = ('앞 차를 끝까지 추적' + (' (넓은 범위)' if wide else '') + ' → ' + f, 'homes on the kart ahead' + (' (wide)' if wide else '') + ' → ' + f)
+    elif k == 'seeker':
+        d = ('1등을 추적해 반경 %dm 폭발 → %s' % (p['r'], f), 'hunts 1st place, %dm blast → %s' % (p['r'], f))
+    elif k == 'bomb':
+        many = ('%d개 ' % p['n']) if p.get('n', 1) > 1 else ''
+        d = ('%s던지면 반경 %dm 폭발 → %s' % (many, p['r'], f), '%sthrow, %dm blast → %s' % (('%d x ' % p['n']) if many else '', p['r'], f))
+    elif k == 'tornado':
+        d = ('앞으로 달리는 회오리 → ' + f, 'roaming storm → ' + f)
+    elif k == 'wave':
+        d = ('내 주변 %dm → %s' % (p['r'], f), 'karts within %dm → %s' % (p['r'], f))
+    elif k == 'zap':
+        sc = _SCOPE.get(p['scope'], ('', ''))
+        d = ('%s → %s' % (sc[0], f), '%s → %s' % (sc[1], f))
+    elif k == 'meteor':
+        d = ('1~%d등에게 메테오 → %s' % (p['n'], f), 'meteors on the top %d → %s' % (p['n'], f))
+    elif k == 'trap':
+        ko_, en_ = '뒤에 설치', 'drop behind'
+        if p.get('n', 1) > 1:
+            ko_, en_ = '뒤에 %d개 깔기' % p['n'], 'drop %d behind' % p['n']
+        if p.get('big'):
+            ko_, en_ = ko_ + ' (크기 2배)', en_ + ' (2x size)'
+        if p.get('persist'):
+            ko_, en_ = ko_ + ' (%d초 유지되는 웅덩이)' % p['life'], en_ + ' (%ds puddle)' % p['life']
+        if p.get('shape') == 'mine':
+            ko_, en_ = ko_ + ' (다가오면 반경 %dm 폭발)' % p.get('blast', 6), en_ + ' (proximity, %dm blast)' % p.get('blast', 6)
+        if p.get('shape') == 'fakebox':
+            ko_, en_ = '진짜처럼 보이는 상자 설치', 'drop a fake item box'
+        d = (ko_ + ' → ' + f, en_ + ' → ' + f)
+    else:
+        d = ('', '')
+    s = d[0] if ko else d[1]
+    if i['uses'] > 1:
+        s += ' (x%d)' % i['uses']
+    return s
+
+
+# ---------------------------------------------------------------------------
+#  아이콘 (벡터): 좌표 -1..1, y 아래 방향.  두 프론트엔드가 같은 정의로 그린다.
+#   ('c', x, y, r, 색)  원      ('e', x, y, rx, ry, 색)  타원      ('r', x, y, r, 두께, 색)  고리
+#   ('p', ((x,y),...), 색)  다각형(중심에서 부채꼴로 채움 -> 별모양/볼록하게 작성)   ('l', ((x,y),...), 두께, 색)  굵은 선
+#   색: 0 = 아이템 색1, 1 = 색2, 그 외 = ICON_COLS
+# ---------------------------------------------------------------------------
+ICON_COLS = {2: (255, 255, 255), 3: (28, 30, 40), 4: (255, 214, 40), 5: (232, 50, 40), 6: (120, 126, 140), 7: (205, 210, 220),
+             8: (120, 72, 36), 9: (40, 150, 60), 10: (12, 12, 16), 11: (255, 140, 30)}
+
+
+def _star_pts(n, ro, ri, rot=-math.pi / 2):
+    return tuple((round(math.cos(rot + math.pi * i / n) * (ro if i % 2 == 0 else ri), 3),
+                  round(math.sin(rot + math.pi * i / n) * (ro if i % 2 == 0 else ri), 3)) for i in range(n * 2))
+
+
+def _ngon(n, r, rot=0.0, cx=0.0, cy=0.0):
+    return tuple((round(cx + math.cos(rot + TAU * i / n) * r, 3), round(cy + math.sin(rot + TAU * i / n) * r, 3)) for i in range(n))
+
+
+def _gear_teeth(n=8, r0=0.5, r1=0.92, hw=0.13, col=0):
+    out = []
+    for i in range(n):
+        a = TAU * i / n
+        c, s = math.cos(a), math.sin(a)
+        out.append(('p', ((c * r0 - s * hw, s * r0 + c * hw), (c * r1 - s * hw, s * r1 + c * hw),
+                          (c * r1 + s * hw, s * r1 - c * hw), (c * r0 + s * hw, s * r0 - c * hw)), col))
+    return out
+
+
+def _flake(col=0, col2=1):
+    out = []
+    for i in range(6):
+        a = TAU * i / 6 - math.pi / 2
+        c, s = math.cos(a), math.sin(a)
+        out.append(('l', ((0.0, 0.0), (c * 0.9, s * 0.9)), 0.13, col))
+        for sg in (-1, 1):
+            b = a + sg * 0.75
+            out.append(('l', ((c * 0.55, s * 0.55), (c * 0.55 + math.cos(b) * 0.28, s * 0.55 + math.sin(b) * 0.28)), 0.1, col))
+    out.append(('c', 0.0, 0.0, 0.17, col2))
+    return out
+
+
+def _spiral(col=0):
+    pts = []
+    for i in range(26):
+        t = i / 25.0
+        a = t * 4.2 * math.pi
+        r = 0.08 + 0.82 * t
+        pts.append((round(math.cos(a) * r, 3), round(math.sin(a) * r, 3)))
+    return [('l', tuple(pts), 0.15, col), ('c', 0.0, 0.0, 0.1, 1)]
+
+
+ICONS = {
+    'flame': [('p', ((0, -0.95), (0.45, -0.25), (0.62, 0.25), (0.4, 0.7), (0, 0.88), (-0.4, 0.7), (-0.62, 0.25), (-0.45, -0.25)), 0),
+              ('p', ((0, -0.3), (0.28, 0.2), (0.25, 0.55), (0, 0.7), (-0.25, 0.55), (-0.28, 0.2)), 1)],
+    'canister': [('p', ((-0.38, -0.45), (0.38, -0.45), (0.38, 0.85), (-0.38, 0.85)), 0), ('p', ((-0.2, -0.75), (0.2, -0.75), (0.2, -0.45), (-0.2, -0.45)), 6),
+                 ('p', ((-0.28, -0.95), (0.28, -0.95), (0.28, -0.75), (-0.28, -0.75)), 1), ('p', ((-0.38, 0.05), (0.38, 0.05), (0.38, 0.3), (-0.38, 0.3)), 1),
+                 ('l', ((-0.22, -0.3), (-0.22, -0.02)), 0.1, 2), ('l', ((-0.22, 0.4), (-0.22, 0.7)), 0.1, 2)],
+    'candy': [('p', ((-0.42, 0), (-0.95, -0.42), (-0.95, 0.42)), 1), ('p', ((0.42, 0), (0.95, 0.42), (0.95, -0.42)), 1), ('c', 0, 0, 0.5, 0),
+              ('l', ((-0.28, -0.3), (0.0, 0.42)), 0.12, 2), ('l', ((0.08, -0.45), (0.32, 0.2)), 0.12, 2)],
+    'chili': [('l', ((-0.55, -0.4), (-0.25, 0.2), (0.2, 0.6), (0.72, 0.75)), 0.42, 0), ('p', ((-0.78, -0.58), (-0.36, -0.78), (-0.28, -0.46), (-0.62, -0.28)), 1),
+              ('l', ((-0.57, -0.7), (-0.66, -0.97)), 0.11, 1), ('l', ((-0.45, -0.15), (-0.18, 0.28)), 0.08, 2)],
+    'gear': [('c', 0, 0, 0.66, 0)] + _gear_teeth() + [('c', 0, 0, 0.27, 1)],
+    'wind': [('l', ((-0.9, -0.35), (0.35, -0.35), (0.55, -0.5), (0.5, -0.72), (0.3, -0.75)), 0.15, 0),
+             ('l', ((-0.9, 0.05), (0.65, 0.05), (0.85, -0.12), (0.8, -0.32)), 0.15, 1),
+             ('l', ((-0.7, 0.45), (0.3, 0.45), (0.5, 0.6), (0.45, 0.8), (0.25, 0.82)), 0.15, 0)],
+    'star': [('p', _star_pts(5, 0.98, 0.44), 0), ('p', _star_pts(5, 0.5, 0.22), 1), ('e', -0.15, -0.05, 0.06, 0.12, 3), ('e', 0.15, -0.05, 0.06, 0.12, 3)],
+    'shield': [('p', ((0, -0.92), (0.76, -0.62), (0.68, 0.15), (0, 0.92), (-0.68, 0.15), (-0.76, -0.62)), 0),
+               ('p', ((0, -0.62), (0.46, -0.42), (0.4, 0.1), (0, 0.6), (-0.4, 0.1), (-0.46, -0.42)), 1),
+               ('l', ((0, -0.45), (0, 0.42)), 0.13, 0), ('l', ((-0.3, -0.1), (0.3, -0.1)), 0.13, 0)],
+    'bubble': [('c', 0, 0, 0.8, 1), ('r', 0, 0, 0.8, 0.15, 0), ('e', -0.32, -0.38, 0.22, 0.11, 2), ('c', 0.36, 0.3, 0.08, 2)],
+    'ghost': [('p', ((-0.62, 0.85), (-0.62, -0.2), (-0.45, -0.66), (0, -0.88), (0.45, -0.66), (0.62, -0.2), (0.62, 0.85), (0.31, 0.6), (0, 0.85), (-0.31, 0.6)), 0),
+              ('e', -0.22, -0.2, 0.12, 0.18, 1), ('e', 0.22, -0.2, 0.12, 0.18, 1), ('e', 0, 0.25, 0.15, 0.1, 1)],
+    'rocket': [('p', ((0, -0.95), (0.3, -0.55), (0.3, 0.45), (-0.3, 0.45), (-0.3, -0.55)), 0), ('p', ((0.3, 0.05), (0.64, 0.5), (0.64, 0.75), (0.3, 0.45)), 1),
+               ('p', ((-0.3, 0.05), (-0.3, 0.45), (-0.64, 0.75), (-0.64, 0.5)), 1), ('c', 0, -0.25, 0.15, 2), ('c', 0, -0.25, 0.08, 3),
+               ('p', ((-0.18, 0.45), (0.18, 0.45), (0, 0.97)), 4)],
+    'spring': [('l', ((-0.55, 0.8), (0.55, 0.8)), 0.17, 1), ('l', ((-0.45, 0.58), (0.45, 0.38), (-0.45, 0.16), (0.45, -0.06), (-0.45, -0.28), (0.45, -0.48)), 0.14, 0),
+               ('l', ((-0.55, -0.7), (0.55, -0.7)), 0.17, 1)],
+    'magnet': [('l', ((-0.5, -0.66), (-0.5, 0.15), (-0.35, 0.55), (0, 0.7), (0.35, 0.55), (0.5, 0.15), (0.5, -0.66)), 0.34, 0),
+               ('p', ((-0.68, -0.96), (-0.32, -0.96), (-0.32, -0.6), (-0.68, -0.6)), 1), ('p', ((0.32, -0.96), (0.68, -0.96), (0.68, -0.6), (0.32, -0.6)), 1)],
+    'wrench': [('l', ((-0.58, 0.62), (0.28, -0.24)), 0.28, 0), ('c', 0.42, -0.42, 0.38, 0), ('c', 0.6, -0.6, 0.2, 3), ('c', -0.58, 0.62, 0.17, 1)],
+    'potion': [('c', 0, 0.3, 0.62, 0), ('p', ((-0.18, -0.75), (0.18, -0.75), (0.18, -0.22), (-0.18, -0.22)), 7),
+               ('p', ((-0.26, -0.96), (0.26, -0.96), (0.26, -0.74), (-0.26, -0.74)), 8), ('e', -0.22, 0.12, 0.12, 0.22, 2), ('c', 0.16, 0.48, 0.1, 1),
+               ('c', -0.05, 0.62, 0.06, 1)],
+    'tire': [('c', 0, 0, 0.92, 0), ('r', 0, 0, 0.8, 0.07, 6), ('c', 0, 0, 0.5, 1), ('c', 0, 0, 0.18, 3)],
+    'portal': [('r', 0, 0, 0.8, 0.2, 0), ('r', 0, 0, 0.5, 0.15, 1), ('c', 0, 0, 0.24, 2)],
+    'mushroom': [('p', ((-0.95, 0.05), (-0.8, -0.45), (-0.4, -0.82), (0, -0.92), (0.4, -0.82), (0.8, -0.45), (0.95, 0.05)), 0),
+                 ('c', -0.45, -0.38, 0.18, 1), ('c', 0.42, -0.44, 0.15, 1), ('c', 0, -0.72, 0.13, 1),
+                 ('p', ((-0.4, 0.05), (0.4, 0.05), (0.35, 0.86), (-0.35, 0.86)), 7), ('e', -0.14, 0.4, 0.06, 0.12, 3), ('e', 0.14, 0.4, 0.06, 0.12, 3)],
+    'coin': [('c', 0, 0, 0.88, 0), ('r', 0, 0, 0.66, 0.1, 1), ('p', ((-0.13, -0.42), (0.13, -0.42), (0.13, 0.42), (-0.13, 0.42)), 1)],
+    'bag': [('c', 0, 0.28, 0.64, 0), ('p', ((-0.24, -0.32), (0.24, -0.32), (0.42, -0.78), (-0.42, -0.78)), 0), ('l', ((-0.32, -0.32), (0.32, -0.32)), 0.11, 1),
+            ('c', 0, 0.3, 0.27, 1), ('l', ((0, 0.12), (0, 0.48)), 0.08, 0)],
+    'chest': [('p', ((-0.86, -0.1), (0.86, -0.1), (0.86, 0.76), (-0.86, 0.76)), 0),
+              ('p', ((-0.86, -0.1), (-0.76, -0.55), (-0.4, -0.76), (0.4, -0.76), (0.76, -0.55), (0.86, -0.1)), 0),
+              ('l', ((-0.86, -0.1), (0.86, -0.1)), 0.12, 1), ('l', ((-0.5, -0.7), (-0.5, 0.76)), 0.11, 1), ('l', ((0.5, -0.7), (0.5, 0.76)), 0.11, 1),
+              ('p', ((-0.13, -0.26), (0.13, -0.26), (0.13, 0.2), (-0.13, 0.2)), 1)],
+    'dice': [('p', ((-0.78, -0.78), (0.78, -0.78), (0.78, 0.78), (-0.78, 0.78)), 0), ('c', -0.4, -0.4, 0.14, 1), ('c', 0, 0, 0.14, 1),
+             ('c', 0.4, 0.4, 0.14, 1), ('c', 0.4, -0.4, 0.14, 1), ('c', -0.4, 0.4, 0.14, 1)],
+    'clover': [('l', ((0.05, 0.1), (0.42, 0.95)), 0.13, 9), ('c', -0.33, -0.33, 0.34, 0), ('c', 0.33, -0.33, 0.34, 0), ('c', -0.33, 0.33, 0.34, 0),
+               ('c', 0.33, 0.33, 0.34, 0), ('c', 0, 0, 0.14, 1)],
+    'swap': [('l', ((-0.72, -0.32), (0.5, -0.32)), 0.19, 0), ('p', ((0.38, -0.66), (0.94, -0.32), (0.38, 0.02)), 0),
+             ('l', ((0.72, 0.36), (-0.5, 0.36)), 0.19, 1), ('p', ((-0.38, 0.02), (-0.94, 0.36), (-0.38, 0.7)), 1)],
+    'hand': [('c', 0, 0.2, 0.55, 0), ('e', -0.42, -0.4, 0.14, 0.3, 0), ('e', -0.14, -0.54, 0.14, 0.33, 0), ('e', 0.14, -0.54, 0.14, 0.33, 0),
+             ('e', 0.42, -0.4, 0.14, 0.3, 0), ('e', -0.62, 0.16, 0.3, 0.14, 0), ('p', ((-0.42, 0.62), (0.42, 0.62), (0.42, 0.96), (-0.42, 0.96)), 1)],
+    'missile': [('p', ((0.95, 0), (0.5, -0.3), (-0.55, -0.3), (-0.55, 0.3), (0.5, 0.3)), 0), ('p', ((-0.25, -0.3), (-0.82, -0.64), (-0.6, -0.3)), 1),
+                ('p', ((-0.25, 0.3), (-0.6, 0.3), (-0.82, 0.64)), 1), ('l', ((0.22, -0.3), (0.22, 0.3)), 0.11, 1), ('p', ((-0.55, -0.16), (-0.97, 0), (-0.55, 0.16)), 4)],
+    'ball': [('c', 0, 0, 0.8, 0), ('r', 0, 0, 0.8, 0.09, 1), ('e', -0.28, -0.32, 0.24, 0.14, 2)],
+    'arrow': [('l', ((-0.82, 0.82), (0.42, -0.42)), 0.14, 1), ('p', ((0.92, -0.92), (0.2, -0.64), (0.64, -0.2)), 0),
+              ('l', ((-0.72, 0.72), (-0.95, 0.5)), 0.11, 0), ('l', ((-0.72, 0.72), (-0.5, 0.95)), 0.11, 0)],
+    'laser': [('p', ((-0.96, 0.18), (-0.38, 0.18), (-0.38, 0.58), (-0.96, 0.58)), 6), ('l', ((-0.4, 0.3), (0.95, -0.62)), 0.26, 0),
+              ('l', ((-0.4, 0.3), (0.95, -0.62)), 0.09, 2)],
+    'balloon': [('l', ((0, 0.72), (0.1, 0.97)), 0.07, 7), ('c', 0, -0.1, 0.74, 0), ('p', ((-0.13, 0.6), (0.13, 0.6), (0, 0.78)), 0),
+                ('e', -0.28, -0.38, 0.17, 0.11, 2)],
+    'pie': [('p', ((-0.92, 0.08), (0.92, 0.08), (0.72, 0.6), (-0.72, 0.6)), 8), ('e', 0, 0.04, 0.92, 0.42, 0), ('c', 0, -0.2, 0.15, 1)],
+    'boomerang': [('l', ((-0.76, 0.6), (-0.1, -0.56), (0.76, 0.6)), 0.31, 0), ('l', ((-0.76, 0.6), (-0.1, -0.56), (0.76, 0.6)), 0.08, 1)],
+    'shuriken': [('p', _star_pts(4, 0.97, 0.3, -math.pi / 4), 0), ('c', 0, 0, 0.17, 1)],
+    'target': [('r', 0, 0, 0.74, 0.15, 0), ('r', 0, 0, 0.38, 0.13, 0), ('l', ((0, -0.97), (0, -0.52)), 0.13, 1), ('l', ((0, 0.52), (0, 0.97)), 0.13, 1),
+               ('l', ((-0.97, 0), (-0.52, 0)), 0.13, 1), ('l', ((0.52, 0), (0.97, 0)), 0.13, 1), ('c', 0, 0, 0.13, 1)],
+    'bee': [('e', -0.26, -0.46, 0.26, 0.18, 2), ('e', 0.26, -0.46, 0.26, 0.18, 2), ('e', 0, 0.1, 0.58, 0.42, 0),
+            ('l', ((-0.14, -0.26), (-0.14, 0.46)), 0.15, 1), ('l', ((0.2, -0.26), (0.2, 0.46)), 0.15, 1), ('p', ((0.55, 0.02), (0.92, 0.1), (0.55, 0.22)), 1)],
+    'drone': [('l', ((-0.7, -0.6), (0.7, 0.6)), 0.11, 6), ('l', ((0.7, -0.6), (-0.7, 0.6)), 0.11, 6),
+              ('p', ((-0.32, -0.22), (0.32, -0.22), (0.32, 0.26), (-0.32, 0.26)), 0),
+              ('e', -0.7, -0.64, 0.26, 0.08, 1), ('e', 0.7, -0.64, 0.26, 0.08, 1), ('e', -0.7, 0.58, 0.26, 0.08, 1), ('e', 0.7, 0.58, 0.26, 0.08, 1),
+              ('c', 0, 0.02, 0.11, 1)],
+    'bird': [('p', ((-0.95, -0.55), (-0.05, 0.02), (-0.12, 0.32), (-0.55, 0.18)), 0), ('p', ((0.95, -0.55), (0.55, 0.18), (0.12, 0.32), (0.05, 0.02)), 0),
+             ('e', 0, 0.2, 0.17, 0.42, 1), ('c', 0, -0.2, 0.15, 1), ('p', ((-0.2, 0.55), (0.2, 0.55), (0, 0.95)), 0)],
+    'wing': [('p', ((-0.5, 0.02), (-0.96, -0.55), (-0.84, -0.1)), 1), ('p', ((-0.5, 0.1), (-0.86, -0.04), (-0.96, 0.3)), 1),
+             ('p', ((0.5, 0.02), (0.84, -0.1), (0.96, -0.55)), 1), ('p', ((0.5, 0.1), (0.96, 0.3), (0.86, -0.04)), 1),
+             ('c', 0, 0.12, 0.56, 0), ('r', 0, 0.12, 0.56, 0.1, 2), ('c', 0, 0.12, 0.2, 2)],
+    'hammer': [('l', ((-0.62, 0.86), (0.22, -0.08)), 0.2, 8), ('p', ((-0.06, -0.76), (0.86, 0.14), (0.56, 0.46), (-0.36, -0.44)), 0),
+               ('p', ((0.12, -0.6), (0.7, -0.02), (0.6, 0.08), (0.02, -0.5)), 1)],
+    'bomb': [('c', 0, 0.16, 0.72, 0), ('e', -0.26, -0.08, 0.17, 0.11, 7), ('p', ((-0.15, -0.72), (0.15, -0.72), (0.15, -0.5), (-0.15, -0.5)), 6),
+             ('l', ((0, -0.72), (0.2, -0.86), (0.45, -0.86)), 0.08, 8), ('c', 0.52, -0.86, 0.13, 1)],
+    'tornado': [('e', 0, -0.66, 0.86, 0.18, 0), ('e', 0.1, -0.3, 0.62, 0.15, 0), ('e', -0.06, 0.05, 0.46, 0.13, 1), ('e', 0.08, 0.38, 0.3, 0.11, 0),
+                ('e', 0, 0.68, 0.17, 0.09, 1)],
+    'snow': _flake(),
+    'wave': [('r', 0, 0, 0.84, 0.11, 0), ('r', 0, 0, 0.57, 0.12, 1), ('r', 0, 0, 0.3, 0.14, 0), ('c', 0, 0, 0.1, 2)],
+    'bolt': [('l', ((0.45, -0.95), (-0.16, 0.0), (0.26, 0.0), (-0.36, 0.96)), 0.24, 0), ('l', ((0.42, -0.85), (-0.12, 0.0), (0.24, 0.0), (-0.3, 0.85)), 0.07, 1)],
+    'cloud': [('l', ((0.12, 0.26), (-0.1, 0.6), (0.16, 0.6), (-0.06, 0.96)), 0.13, 1), ('c', -0.4, -0.1, 0.36, 0), ('c', 0.05, -0.32, 0.46, 0),
+              ('c', 0.46, -0.06, 0.35, 0), ('p', ((-0.76, -0.06), (0.8, -0.06), (0.8, 0.26), (-0.76, 0.26)), 0)],
+    'squid': [('l', ((-0.35, 0.25), (-0.46, 0.86)), 0.13, 0), ('l', ((-0.12, 0.25), (-0.15, 0.93)), 0.13, 0), ('l', ((0.12, 0.25), (0.15, 0.93)), 0.13, 0),
+              ('l', ((0.35, 0.25), (0.46, 0.86)), 0.13, 0), ('p', ((0, -0.96), (0.43, -0.4), (0.43, 0.26), (-0.43, 0.26), (-0.43, -0.4)), 0),
+              ('c', -0.17, -0.05, 0.12, 1), ('c', 0.17, -0.05, 0.12, 1), ('c', -0.15, -0.05, 0.055, 3), ('c', 0.19, -0.05, 0.055, 3)],
+    'swirl': _spiral(),
+    'note': [('e', -0.3, 0.6, 0.29, 0.21, 0), ('e', 0.45, 0.4, 0.29, 0.21, 0), ('l', ((-0.04, 0.6), (-0.04, -0.66)), 0.13, 0),
+             ('l', ((0.71, 0.4), (0.71, -0.86)), 0.13, 0), ('p', ((-0.1, -0.7), (0.77, -0.92), (0.77, -0.6), (-0.1, -0.4)), 0)],
+    'meteor': [('l', ((0.95, -0.95), (0.08, -0.08)), 0.5, 4), ('l', ((0.92, -0.6), (0.1, -0.1)), 0.2, 11), ('l', ((0.6, -0.92), (0.1, -0.1)), 0.2, 11),
+               ('c', -0.2, 0.2, 0.56, 0), ('c', -0.36, 0.06, 0.13, 1), ('c', -0.04, 0.42, 0.1, 1), ('c', -0.38, 0.4, 0.07, 1)],
+    'banana': [('l', ((-0.6, -0.68), (-0.62, -0.1), (-0.4, 0.4), (0.05, 0.72), (0.62, 0.76)), 0.34, 0), ('l', ((-0.6, -0.68), (-0.62, -0.88)), 0.14, 1),
+               ('l', ((-0.45, -0.25), (-0.3, 0.26), (0.06, 0.5)), 0.07, 2)],
+    'drop': [('p', ((0, -0.93), (0.5, -0.1), (0.6, 0.3), (0.42, 0.7), (0, 0.86), (-0.42, 0.7), (-0.6, 0.3), (-0.5, -0.1)), 0), ('e', -0.22, 0.2, 0.1, 0.18, 1)],
+    'box': [('p', ((-0.82, -0.82), (0.82, -0.82), (0.82, 0.82), (-0.82, 0.82)), 0), ('p', ((-0.64, -0.64), (0.64, -0.64), (0.64, 0.64), (-0.64, 0.64)), 1),
+            ('l', ((-0.26, -0.3), (-0.15, -0.5), (0.15, -0.5), (0.27, -0.3), (0.0, -0.04), (0.0, 0.16)), 0.15, 0), ('c', 0, 0.42, 0.1, 0)],
+    'spikes': [('p', ((-0.92, 0.6), (0.92, 0.6), (0.92, 0.86), (-0.92, 0.86)), 1)] +
+              [('p', ((-0.92 + k * 0.46, 0.6), (-0.46 + k * 0.46, 0.6), (-0.69 + k * 0.46, -0.52)), 0) for k in range(4)],
+    'mine': [('e', 0, 0.3, 0.86, 0.4, 0), ('e', 0, 0.16, 0.6, 0.25, 6), ('c', 0, 0.04, 0.19, 1), ('e', -0.06, -0.02, 0.06, 0.04, 2)],
+    'glue': [('c', -0.35, 0.25, 0.46, 0), ('c', 0.3, 0.3, 0.5, 0), ('c', 0, -0.1, 0.42, 0), ('c', 0.56, -0.26, 0.18, 0), ('c', -0.62, -0.32, 0.12, 0),
+             ('e', -0.25, 0.0, 0.13, 0.08, 1)],
+    'ice': [('p', _ngon(6, 0.9, -math.pi / 2), 0), ('p', _ngon(6, 0.52, -math.pi / 2), 1)] +
+           [('l', ((0, 0), (round(math.cos(-math.pi / 2 + TAU * i / 6) * 0.86, 3), round(math.sin(-math.pi / 2 + TAU * i / 6) * 0.86, 3))), 0.06, 2) for i in range(6)],
+    'wall': [('l', ((-0.6, 0.2), (-0.6, 0.92)), 0.15, 6), ('l', ((0.6, 0.2), (0.6, 0.92)), 0.15, 6),
+             ('p', ((-0.92, -0.45), (0.92, -0.45), (0.92, 0.2), (-0.92, 0.2)), 0)] +
+            [('p', ((-0.92 + k * 0.5, -0.45), (-0.7 + k * 0.5, -0.45), (-0.5 + k * 0.5, 0.2), (-0.72 + k * 0.5, 0.2)), 1) for k in range(4)] +
+            [('c', -0.6, -0.62, 0.13, 4), ('c', 0.6, -0.62, 0.13, 4)],
+}
+
+
+def icon_color(item, ci):
+    if ci == 0:
+        return item['c1']
+    if ci == 1:
+        return item['c2']
+    return ICON_COLS.get(ci, (255, 255, 255))
+
+
+# ---------------------------------------------------------------------------
+#  투사체/함정 하나
+# ---------------------------------------------------------------------------
+class Ent(object):
+    __slots__ = ('eid', 'kind', 'item', 'owner', 'x', 'y', 'z', 'vx', 'vy', 'vz', 'h', 'hint', 'd', 'life', 'age', 'r',
+                 'target', 'bounce', 'state', 'dead', 'hits', 'gy', 'prog')
+
+    def __init__(self):
+        self.hits = {}
+        self.dead = False
+        self.state = 0
+        self.age = 0.0
+        self.x = self.y = self.z = 0.0
+        self.vx = self.vy = self.vz = 0.0
+        self.target = None
+        self.bounce = 0
+        self.hint = -1
+        self.h = 0.0
+        self.d = 0.0
+        self.gy = 0.0
+        self.prog = 0.0
+        self.life = 4.0
+        self.r = 1.2
+
+
+# 주인이 자기 투사체/함정에 바로 맞지 않는 시간
+_ARM = {'shot': 0.45, 'boomerang': 99.0, 'homing': 99.0, 'tornado': 99.0, 'trap': 1.0, 'bomb': 99.0}
+
+
+class ItemSystem(object):
+    """아이템 상자 + 슬롯 + 사용 + 투사체/함정 + 봇 판단 + 네트워크.
+    권한: 각 기기는 자기가 시뮬레이션하는 카트(내 카트 + 방장이면 봇)에 대해서만 맞았는지 판정하고, 그 결과를 알린다."""
+    BOX_RESPAWN = 2.6
+    ROLL_TIME = 0.9
+
+    def __init__(self, race):
+        self.race = race
+        self.track = race.track
+        self.q = Q()
+        self.rng = Rng((int(time.time() * 1000) ^ (id(self) & 0xFFFF)) & 0xFFFFFFFF)
+        self.ents = []
+        self.seq = 0
+        self.vfx = []
+        self.boxes = []
+        self.t = 0.0
+        self._make_boxes()
+
+    # ---- 상자 ----------------------------------------------------------------------
+    def _make_boxes(self):
+        tr = self.track
+        N = tr.N
+        rows = int(clamp(tr.length / 420.0, 4, 8))
+        r = Rng(tr.info['seed'] ^ 0x1717)
+        pads = [p['idx'] for p in tr.pads]
+        for k in range(rows):
+            idx = int(((k + 0.35 + r() * 0.3) / rows) * N)
+            idx = max(20, min(N - 14, idx))
+            for _ in range(4):
+                if any(abs(idx - pi) < 7 for pi in pads):
+                    idx = max(20, min(N - 14, idx + 9))
+                else:
+                    break
+            for j in range(4):
+                d = tr.hw * (-0.66 + 0.44 * j)
+                x, y, z, h = tr.pose_at(idx, d)
+                self.boxes.append({'x': x, 'y': y + 1.15, 'z': z, 'idx': idx, 't': 0.0, 'ph': r() * TAU, 'h': h})
+
+    def _boxes_step(self, dt):
+        for b in self.boxes:
+            if b['t'] > 0:
+                b['t'] = max(0.0, b['t'] - dt)
+        race = self.race
+        if race.phase != 'run':
+            return
+        N = self.track.N
+        for rc in race.racers:
+            if rc.sim is None or rc.finished:
+                continue
+            for i, b in enumerate(self.boxes):
+                if b['t'] > 0:
+                    continue
+                di = (rc.idx - b['idx']) % N
+                if 3 < di < N - 3:
+                    continue
+                dx = rc.x - b['x']
+                dz = rc.z - b['z']
+                if dx * dx + dz * dz < 4.4 * rc.scale:
+                    b['t'] = self.BOX_RESPAWN
+                    self.vfx.append(('box', b['x'], b['y'], b['z']))
+                    self._send({'t': 'ib', 'b': i})
+                    self.give(rc, self.roll_item(rc))
+
+    def roll_item(self, rc, min_tier=0, lucky_ok=True):
+        rank = self.race.ranking()
+        n = len(rank)
+        pos = rank.index(rc) if rc in rank else 0
+        f = pos / float(n - 1) if n > 1 else 0.5
+        tw = [1.25 - 0.95 * f, 0.75 + 0.35 * f, 0.08 + 0.95 * f, max(0.0, f - 0.4) * 1.5]
+        for t in range(min_tier):
+            tw[t] = 0.0
+        if sum(tw) <= 0:
+            tw[3] = 1.0
+        total = 0.0
+        ws = []
+        for it in ITEMS:
+            w = tw[it['tier']] / _TIER_N[it['tier']]
+            if not lucky_ok and it['kind'] == 'lucky':
+                w = 0.0
+            ws.append(w)
+            total += w
+        x = self.rng() * total
+        for i, w in enumerate(ws):
+            x -= w
+            if x <= 0 and w > 0:
+                return i
+        return ITEM_BY_KEY['booster']
+
+    def give(self, rc, it, uses=None, roll=None):
+        """빈 슬롯에 아이템 넣기 (가득 차 있으면 False)"""
+        for s in range(ITEM_SLOTS):
+            if rc.items[s] is None:
+                rc.items[s] = it
+                rc.uses[s] = ITEMS[it]['uses'] if uses is None else max(1, int(uses))
+                rc.roll[s] = self.ROLL_TIME if roll is None else roll
+                rc.hold[s] = 0.0
+                if rc.kind == 'local':
+                    self.race.ev(('item', 'roll', it, s))
+                return True
+        return False
+
+    # ---- 사용 ----------------------------------------------------------------------
+    def use(self, rc, slot, back=False):
+        race = self.race
+        if rc is None or rc.sim is None or race.phase != 'run' or rc.finished:
+            return False
+        if not (0 <= slot < ITEM_SLOTS):
+            return False
+        it = rc.items[slot]
+        if it is None or rc.roll[slot] > 0:
+            return False
+        item = ITEMS[it]
+        if item['kind'] == 'lucky':
+            new = self.roll_item(rc, item['p']['min'], False)
+            rc.items[slot] = new
+            rc.uses[slot] = ITEMS[new]['uses']
+            rc.roll[slot] = self.ROLL_TIME * 0.8
+            rc.hold[slot] = 0.0
+            self._ev(rc, ('item', 'use', it))
+            self._ev(rc, ('item', 'roll', new, slot))
+            return True
+        self._activate(rc, it, back)
+        rc.uses[slot] -= 1
+        if rc.uses[slot] <= 0:
+            rc.items[slot] = None
+            rc.uses[slot] = 0
+        self._ev(rc, ('item', 'use', it))
+        return True
+
+    def _ev(self, rc, ev):
+        if rc is not None and rc.kind == 'local':
+            self.race.ev(ev)
+
+    def _send(self, msg):
+        race = self.race
+        if race.multi and race.net is not None:
+            race.net.send(msg)
+
+    def _ahead(self, rc, maxm=None):
+        """진행 거리 기준으로 나보다 앞에 있는 카트들 (가까운 순)"""
+        ds = self.track.ds
+        out = []
+        for o in self.race.racers:
+            if o is rc or o.finished:
+                continue
+            gap = (o.total - rc.total) * ds
+            if gap > 0 and (maxm is None or gap <= maxm):
+                out.append((gap, o))
+        out.sort(key=lambda t: t[0])
+        return [o for _, o in out]
+
+    def _activate(self, rc, it, back=False):
+        item = ITEMS[it]
+        k = item['kind']
+        p = item['p']
+        s = rc.sim
+        if k == 'boost':
+            s.boost_t = max(s.boost_t, p['dur'])
+            s.boost_pow = p['pow']
+            self.vfx.append(('boost', rc.id))
+        elif k == 'engine':
+            s.engine_t = p['dur']
+            s.engine_cap = p['cap']
+            s.engine_acc = p['acc']
+        elif k == 'star':
+            s.cure()
+            s.star_t = max(s.star_t, p['dur'])
+        elif k == 'shield':
+            s.shield_n = max(s.shield_n, p['n'])
+            s.shield_t = max(s.shield_t, p['dur'])
+        elif k == 'ghost':
+            s.ghost_t = p['dur']
+            if p.get('steal'):
+                self._steal(rc, 1, it)
+        elif k == 'rocket':
+            s.cure()
+            s.auto_t = p['dur']
+            s.auto_spd = p['spd']
+        elif k == 'hop':
+            s.hop_t = s.hop_dur = p['air']
+            s.boost_t = max(s.boost_t, p['boost'])
+            s.boost_pow = 0.8
+        elif k == 'magnet':
+            s.magnet_t = p['dur']
+            s.magnet_range = p['range']
+        elif k == 'cleanse':
+            s.cure()
+            s.immune_t = max(s.immune_t, p['immune'])
+            s.boost_t = max(s.boost_t, 0.5)
+        elif k == 'grip':
+            s.grip_t = p['dur']
+        elif k == 'warp':
+            self._warp(rc, p['dist'])
+            s.immune_t = max(s.immune_t, 0.8)
+        elif k == 'giant':
+            s.shrink_t = 0.0
+            s.giant_t = p['dur']
+        elif k == 'coin':
+            s.coins = min(10, s.coins + p['n'])
+            s.boost_t = max(s.boost_t, 0.4)
+        elif k == 'swap':
+            self._swap(rc, p['range'], it)
+        elif k == 'steal':
+            self._steal(rc, p['n'], it)
+        elif k == 'wave':
+            rr = p['r'] * p['r']
+            tg = [o for o in self.race.racers if o is not rc and not o.finished and (o.x - rc.x) ** 2 + (o.z - rc.z) ** 2 < rr]
+            if p.get('boost'):
+                s.boost_t = max(s.boost_t, p['boost'])
+            self._area(rc, it, tg)
+        elif k == 'zap':
+            sc = p['scope']
+            if sc == 'all':
+                tg = [o for o in self.race.racers if o is not rc and not o.finished]
+            elif sc == 'top3':
+                tg = [o for o in self.race.ranking() if o is not rc and not o.finished][:3]
+            else:
+                ah = self._ahead(rc)
+                tg = ah[:1] if sc == 'ahead1' else (ah[:3] if sc == 'ahead3' else ah)
+            self._area(rc, it, tg)
+        else:
+            self._throw(rc, it, back)
+
+    def _warp(self, rc, dist):
+        s = rc.sim
+        tr = self.track
+        pf = (s.q.prog + dist / tr.ds) % tr.N
+        d = clamp(s.q.d, -tr.hw * 0.8, tr.hw * 0.8)
+        x, y, z, h = tr.pose_at(pf, d)
+        self.vfx.append(('warp', rc.x, rc.y, rc.z))
+        s.teleport(x, z, h)
+        self.vfx.append(('warp', x, y, z))
+
+    def _swap(self, rc, rng, it):
+        ah = self._ahead(rc, rng)
+        if not ah:
+            rc.sim.boost_t = max(rc.sim.boost_t, 1.0)        # 앞에 아무도 없으면 부스터로
+            return
+        o = ah[0]
+        mine = (rc.x, rc.z, rc.h)
+        self.vfx.append(('warp', rc.x, rc.y, rc.z))
+        self.vfx.append(('warp', o.x, o.y, o.z))
+        rc.sim.teleport(o.x, o.z, o.h)
+        if o.sim is not None:
+            o.sim.teleport(mine[0], mine[1], mine[2])
+            self._ev(o, ('item', 'hit', 'swap', it))
+        else:
+            self._send({'t': 'ia', 'k': 'swap', 'o': rc.id, 'it': it, 'tg': [o.id], 'pos': [round(mine[0], 2), round(mine[1], 2), round(mine[2], 3)]})
+
+    def _steal(self, rc, n, it):
+        got = 0
+        for o in self._ahead(rc):
+            if got >= n:
+                break
+            if o.sim is not None:
+                slots = [s for s in range(ITEM_SLOTS) if o.items[s] is not None and o.roll[s] <= 0]
+                if slots:
+                    s = slots[int(self.rng() * len(slots)) % len(slots)]
+                    took, uses = o.items[s], o.uses[s]
+                    o.items[s] = None
+                    o.uses[s] = 0
+                    self._ev(o, ('item', 'stolen', took))
+                    if self.give(rc, took, uses, 0.4):
+                        got += 1
+            else:
+                self._send({'t': 'ia', 'k': 'steal', 'o': rc.id, 'it': it, 'tg': [o.id]})
+                got += 1
+
+    def _area(self, owner, it, targets):
+        ids = [o.id for o in targets]
+        self._apply_area(owner.id, it, ids)
+        self._send({'t': 'ia', 'o': owner.id, 'it': it, 'tg': ids})
+
+    def _apply_area(self, owner_id, it, ids):
+        if not (isinstance(it, int) and 0 <= it < ITEM_COUNT):
+            return
+        item = ITEMS[it]
+        p = item['p']
+        own = self.race._find(owner_id)
+        if item['kind'] == 'wave' and own is not None:
+            self.vfx.append(('ring', own.x, own.y, own.z, p['r'], item['c1']))
+        self.vfx.append(('area', it, owner_id, list(ids)))
+        for rid in ids:
+            rc = self.race._find(rid)
+            if rc is not None and rc.sim is not None:
+                self.apply(rc, p['fx'], p.get('fxd'), p.get('k'), it, owner_id)
+
+    def _throw(self, rc, it, back):
+        item = ITEMS[it]
+        k = item['kind']
+        p = item['p']
+        s = rc.sim
+        tr = self.track
+        specs = []
+        sp_k = max(0.0, s.vx * math.sin(rc.h) + s.vz * math.cos(rc.h))
+        if k in ('shot', 'boomerang'):
+            n = p.get('n', 1)
+            for j in range(n):
+                h = rc.h + (j - (n - 1) / 2.0) * 0.2 + (math.pi if back else 0.0)
+                fx, fz = math.sin(h), math.cos(h)
+                v = p['spd'] + (sp_k if not back else 0.0)
+                specs.append({'k': k, 'x': rc.x + fx * 2.8, 'y': rc.y + 0.6, 'z': rc.z + fz * 2.8, 'vx': fx * v, 'vz': fz * v})
+        elif k == 'homing':
+            ah = self._ahead(rc, 420.0)
+            fx, fz = math.sin(rc.h), math.cos(rc.h)
+            v = p['spd']
+            specs.append({'k': k, 'x': rc.x + fx * 2.8, 'y': rc.y + 0.7, 'z': rc.z + fz * 2.8, 'vx': fx * v, 'vz': fz * v, 'tg': ah[0].id if ah else None})
+        elif k == 'seeker':
+            tg = None
+            for o in self.race.ranking():
+                if o is not rc and not o.finished:
+                    tg = o.id
+                    break
+            specs.append({'k': k, 'x': rc.x, 'y': rc.y + 4.0, 'z': rc.z, 'tg': tg})
+        elif k == 'bomb':
+            n = p.get('n', 1)
+            for j in range(n):
+                h = rc.h + (j - (n - 1) / 2.0) * 0.3 + (math.pi if back else 0.0)
+                fx, fz = math.sin(h), math.cos(h)
+                hs = (sp_k if not back else 0.0) + p['dist'] / 0.7
+                specs.append({'k': k, 'x': rc.x + fx * 2.2, 'y': rc.y + 1.2, 'z': rc.z + fz * 2.2, 'vx': fx * hs, 'vz': fz * hs, 'vy': 9.0})
+        elif k == 'tornado':
+            specs.append({'k': k, 'p': (s.q.prog + 14.0 / tr.ds) % tr.N, 'd': clamp(s.q.d, -tr.hw * 0.5, tr.hw * 0.5)})
+        elif k == 'meteor':
+            for o in [o for o in self.race.ranking() if o is not rc and not o.finished][:p['n']]:
+                specs.append({'k': k, 'x': o.x, 'y': o.y + 40.0, 'z': o.z, 'tg': o.id})
+        elif k == 'trap':
+            n = p.get('n', 1)
+            fx, fz = math.sin(rc.h), math.cos(rc.h)
+            for j in range(n):
+                if n == 1:
+                    x, z = rc.x - fx * 3.2, rc.z - fz * 3.2
+                else:
+                    d = tr.hw * (-0.75 + 1.5 * j / (n - 1))
+                    x, _y, z, _h = tr.pose_at((s.q.prog - (7.0 + (j % 2) * 5.0) / tr.ds) % tr.N, d)
+                tr.query(x, z, s.hint, self.q)
+                specs.append({'k': k, 'x': x, 'y': self.q.y + 0.05, 'z': z, 'h': rc.h})
+        ents = [self._spawn(rc.id, it, sp) for sp in specs]
+        if ents:
+            self._send({'t': 'iu', 'o': rc.id, 'it': it, 'e': [self._wire(e, sp) for e, sp in zip(ents, specs)]})
+
+    def _wire(self, e, sp):
+        w = {'i': e.eid}
+        for key in ('k', 'x', 'y', 'z', 'vx', 'vz', 'vy', 'h', 'p', 'd'):
+            if key in sp:
+                w[key] = round(sp[key], 3) if isinstance(sp[key], float) else sp[key]
+        if sp.get('tg') is not None:
+            w['tg'] = sp['tg']
+        return w
+
+    def _spawn(self, owner, it, sp, eid=None):
+        if eid is None:
+            self.seq += 1
+            eid = '%s.%d' % (owner, self.seq)
+        p = ITEMS[it]['p']
+        tr = self.track
+        e = Ent()
+        e.eid = eid
+        e.kind = sp.get('k', 'shot')
+        e.item = it
+        e.owner = owner
+        e.x = float(sp.get('x', 0.0))
+        e.y = float(sp.get('y', 0.0))
+        e.z = float(sp.get('z', 0.0))
+        e.vx = float(sp.get('vx', 0.0))
+        e.vz = float(sp.get('vz', 0.0))
+        e.vy = float(sp.get('vy', 0.0))
+        e.h = float(sp.get('h', math.atan2(e.vx, e.vz) if (e.vx or e.vz) else 0.0))
+        e.target = sp.get('tg')
+        e.life = float(p.get('life', 4.0))
+        e.r = float(p.get('r', 1.2))
+        e.bounce = int(p.get('bounce', 0))
+        if e.kind == 'tornado':
+            e.prog = float(sp.get('p', 0.0))
+            e.d = float(sp.get('d', 0.0))
+            e.x, e.y, e.z, e.h = tr.pose_at(e.prog, e.d)
+        elif e.kind == 'meteor':
+            e.life = p.get('fall', 1.6) + 0.3
+            e.gy = e.y - 40.0
+        elif e.kind == 'bomb':
+            e.life = 6.0
+        elif e.kind == 'trap':
+            e.gy = e.y
+        tr.query(e.x, e.z, -1, self.q)
+        e.hint = self.q.idx
+        e.prog = self.q.prog if e.kind != 'tornado' else e.prog
+        self.ents.append(e)
+        if len(self.ents) > 140:                  # 너무 많으면 오래된 함정부터 정리
+            for old in self.ents:
+                if old.kind == 'trap' and not old.dead:
+                    old.dead = True
+                    break
+        return e
+
+    def _get(self, eid):
+        for e in self.ents:
+            if e.eid == eid:
+                return e
+        return None
+
+    # ---- 맞음 처리 ----------------------------------------------------------------------
+    def apply(self, rc, fx, dur=None, k=None, it=None, owner_id=None):
+        """권한 있는 카트(rc.sim 존재)에 효과 적용"""
+        s = rc.sim
+        if s is None:
+            return 'immune'
+        res = s.hit(fx, dur or 0.0, k or 0.0)
+        if res == 'ok':
+            if fx == 'warpback':
+                self._warp(rc, -float(dur or 40.0))
+            self.vfx.append(('hit', rc.x, rc.y, rc.z, fx))
+            self._ev(rc, ('item', 'hit', fx, it))
+            loc = self.race.local
+            if loc is not None and owner_id == loc.id and rc is not loc:
+                self.race.ev(('item', 'score', rc.name, it))
+        elif res == 'block':
+            self.vfx.append(('block', rc.x, rc.y, rc.z))
+            self._ev(rc, ('item', 'block', it))
+        return res
+
+    def _explode(self, e, notify=False):
+        if e.dead:
+            return
+        e.dead = True
+        p = ITEMS[e.item]['p']
+        r = float(p.get('blast', p.get('r', 6.0)))
+        self.vfx.append(('boom', e.x, e.y, e.z, r, ITEMS[e.item]['c1']))
+        if notify:
+            self._send({'t': 'ih', 'e': e.eid, 'boom': 1})
+        rr = r * r
+        for rc in self.race.racers:
+            if rc.sim is None or rc.finished:
+                continue
+            if e.kind == 'bomb' and rc.id == e.owner:
+                continue                           # 던진 사람은 자기 폭탄에 안 맞음
+            if (rc.x - e.x) ** 2 + (rc.z - e.z) ** 2 < rr and abs(rc.y - e.y) < 8.0:
+                self.apply(rc, p['fx'], p.get('fxd'), p.get('k'), e.item, e.owner)
+
+    def _hit_by(self, e, rc):
+        p = ITEMS[e.item]['p']
+        if e.kind in ('bomb',) or (e.kind == 'trap' and p.get('shape') == 'mine'):
+            self._explode(e, True)
+            return True
+        persist = bool(p.get('persist')) or e.kind == 'tornado'
+        if persist:
+            last = e.hits.get(rc.id, -99.0)
+            cool = 0.3 if p.get('fx') == 'slow' else 1.2
+            if self.t - last < cool:
+                return False
+            e.hits[rc.id] = self.t
+        res = self.apply(rc, p['fx'], p.get('fxd'), p.get('k'), e.item, e.owner)
+        if not persist:
+            e.dead = True
+            self.vfx.append(('pop', e.x, e.y, e.z, ITEMS[e.item]['c1']))
+            self._send({'t': 'ih', 'e': e.eid, 'v': rc.id})
+            return True
+        return res == 'ok'
+
+    def _collide(self, e):
+        k = e.kind
+        if k in ('seeker', 'meteor') or (k == 'bomb' and e.state == 0):
+            return
+        ground = k in ('trap', 'bomb')
+        for rc in self.race.racers:
+            s = rc.sim
+            if s is None or rc.finished or e.dead:
+                continue
+            if rc.id == e.owner and e.age < _ARM.get(k, 0.5):
+                continue
+            if ground and rc.air_y > 0.6:
+                continue                       # 점프/날아가는 중에는 바닥 함정 위를 지나감
+            if k == 'bomb':
+                rr = 2.6 + 1.1 * rc.scale       # 땅에 떨어진 폭탄: 가까이 오면 터짐
+            else:
+                rr = e.r + 1.1 * rc.scale
+            dx = rc.x - e.x
+            dz = rc.z - e.z
+            if dx * dx + dz * dz < rr * rr and abs(rc.y + rc.air_y - e.y) < 3.5:
+                if self._hit_by(e, rc) and e.dead:
+                    return
+
+    # ---- 매 스텝 ----------------------------------------------------------------------
+    def step(self, dt):
+        self.t += dt
+        race = self.race
+        self._boxes_step(dt)
+        for rc in race.racers:
+            s = rc.sim
+            if s is None:
+                continue
+            for i in range(ITEM_SLOTS):
+                if rc.roll[i] > 0:
+                    rc.roll[i] -= dt
+                    if rc.roll[i] <= 0:
+                        rc.roll[i] = 0.0
+                        if rc.items[i] is not None:
+                            self._ev(rc, ('item', 'get', rc.items[i], i))
+            if s.magnet_t > 0:
+                ah = self._ahead(rc, s.magnet_range)
+                s.pull = None
+                if ah:
+                    o = ah[0]
+                    dx, dz = o.x - rc.x, o.z - rc.z
+                    l = math.hypot(dx, dz)
+                    if l > 3.0:
+                        s.pull = (dx / l, dz / l)
+        for e in self.ents:
+            if not e.dead:
+                self._step_ent(e, dt)
+            if not e.dead:
+                self._collide(e)
+        self._ram(dt)
+        if any(e.dead for e in self.ents):
+            self.ents = [e for e in self.ents if not e.dead]
+
+    def _ram(self, dt):
+        """무적/거대화/로켓 카트에 부딪히면 날아간다 (피해자 쪽 기기가 판정)"""
+        rs = self.race.racers
+        for v in rs:
+            s = v.sim
+            if s is None or v.finished or s.ram_cool > 0 or (v.fx & (FX_RAM | FX_GHOST)):
+                continue
+            for o in rs:
+                if o is v or not (o.fx & FX_RAM) or (o.fx & FX_GHOST):
+                    continue
+                rr = 2.4 + (1.4 if o.fx & FX_GIANT else 0.0)
+                if (o.x - v.x) ** 2 + (o.z - v.z) ** 2 < rr * rr:
+                    self.apply(v, 'flat' if o.fx & FX_GIANT else 'spin', None, None, None, o.id)
+                    s.ram_cool = 1.2
+                    break
+
+    def _move_flat(self, e, dt, bounce):
+        """지면을 따라 이동 + 벽 처리 (bounce: 반사, 아니면 미끄러짐)"""
+        tr = self.track
+        q = self.q
+        sp = math.hypot(e.vx, e.vz)
+        n = max(1, int(math.ceil(sp * dt / 1.5)))
+        sdt = dt / n
+        lim = tr.wall_off - 0.9
+        for _ in range(n):
+            e.x += e.vx * sdt
+            e.z += e.vz * sdt
+            tr.query(e.x, e.z, e.hint, q)
+            e.hint = q.idx
+            if abs(q.d) > lim:
+                sg = sign(q.d)
+                over = abs(q.d) - lim
+                e.x -= q.rx * over * sg
+                e.z -= q.rz * over * sg
+                vn = (e.vx * q.rx + e.vz * q.rz) * sg
+                if vn > 0:
+                    if bounce:
+                        e.vx -= 2 * vn * q.rx * sg
+                        e.vz -= 2 * vn * q.rz * sg
+                        e.bounce -= 1
+                        if e.bounce < 0:
+                            e.dead = True
+                            self.vfx.append(('pop', e.x, e.y, e.z, ITEMS[e.item]['c1']))
+                            return
+                    else:
+                        e.vx -= vn * q.rx * sg
+                        e.vz -= vn * q.rz * sg
+        e.prog = q.prog
+        e.d = q.d
+        return q.y
+
+    def _steer_to(self, e, ax, az, spd, dt, turn=6.0):
+        dx, dz = ax - e.x, az - e.z
+        l = math.hypot(dx, dz) or 1.0
+        cx, cz = e.vx / (math.hypot(e.vx, e.vz) or 1.0), e.vz / (math.hypot(e.vx, e.vz) or 1.0)
+        k = min(1.0, dt * turn)
+        nx, nz = cx + (dx / l - cx) * k, cz + (dz / l - cz) * k
+        nl = math.hypot(nx, nz) or 1.0
+        e.vx, e.vz = nx / nl * spd, nz / nl * spd
+
+    def _step_ent(self, e, dt):
+        item = ITEMS[e.item]
+        p = item['p']
+        k = e.kind
+        tr = self.track
+        e.age += dt
+        if k in ('shot', 'boomerang'):
+            if k == 'boomerang' and e.state == 0 and e.age > p.get('out', 1.3):
+                e.state = 1
+            if k == 'boomerang' and e.state == 1:
+                own = self.race._find(e.owner)
+                if own is None:
+                    e.dead = True
+                    return
+                self._steer_to(e, own.x, own.z, p['spd'] + own.speed, dt, 5.0)
+                if (own.x - e.x) ** 2 + (own.z - e.z) ** 2 < 6.0:
+                    e.dead = True                       # 주인이 다시 잡음
+                    return
+            gy = self._move_flat(e, dt, k == 'shot')
+            if e.dead:
+                return
+            e.y = gy + 0.6
+            e.h = math.atan2(e.vx, e.vz)
+        elif k == 'homing':
+            tgt = self.race._find(e.target) if e.target is not None else None
+            spd = p['spd']
+            if tgt is not None and not tgt.finished and (tgt.x - e.x) ** 2 + (tgt.z - e.z) ** 2 < 45.0 ** 2:
+                self._steer_to(e, tgt.x, tgt.z, spd, dt, 7.0)
+            else:
+                dd = e.d * 0.9
+                if tgt is not None and not tgt.finished:
+                    tr.query(tgt.x, tgt.z, tgt.idx, self.q)
+                    dd = clamp(self.q.d, -tr.hw, tr.hw)
+                x, _y, z, _h = tr.pose_at((e.prog + 10.0 / tr.ds) % tr.N, e.d + (dd - e.d) * 0.3)
+                self._steer_to(e, x, z, spd, dt, 6.0)
+            gy = self._move_flat(e, dt, False)
+            e.y = gy + 0.7
+            e.h = math.atan2(e.vx, e.vz)
+        elif k == 'seeker':
+            tgt = self.race._find(e.target) if e.target is not None else None
+            if tgt is None or tgt.finished:
+                self._explode(e)
+                return
+            spd = p['spd']
+            tr.query(e.x, e.z, e.hint, self.q)
+            e.hint = self.q.idx
+            dist = math.hypot(tgt.x - e.x, tgt.z - e.z)
+            if dist < 26.0:
+                self._steer_to(e, tgt.x, tgt.z, spd, dt, 9.0)
+                e.y += (tgt.y + 0.8 - e.y) * min(1.0, dt * 5.0)
+            else:
+                x, _y, z, _h = tr.pose_at((self.q.prog + 16.0 / tr.ds) % tr.N, 0.0)
+                self._steer_to(e, x, z, spd, dt, 5.0)
+                e.y += (self.q.y + 6.0 - e.y) * min(1.0, dt * 3.0)
+            e.x += e.vx * dt
+            e.z += e.vz * dt
+            e.h = math.atan2(e.vx, e.vz)
+            if dist < 2.6:
+                self._explode(e)
+                return
+        elif k == 'bomb':
+            if e.state == 0:
+                e.vy -= 26.0 * dt
+                e.y += e.vy * dt
+                gy = self._move_flat(e, dt, False)
+                if e.y <= gy + 0.45 and e.vy < 0:
+                    e.y = gy + 0.45
+                    e.state = 1
+                    e.age = 0.0
+                    e.vx *= 0.25                     # 떨어진 자리에 거의 멈춘다
+                    e.vz *= 0.25
+            else:
+                e.vx *= math.exp(-6.0 * dt)
+                e.vz *= math.exp(-6.0 * dt)
+                e.y = self._move_flat(e, dt, False) + 0.45
+                if e.age >= p['fuse']:
+                    self._explode(e)
+                    return
+        elif k == 'tornado':
+            e.prog = (e.prog + p['spd'] * dt / tr.ds) % tr.N
+            dd = math.sin(e.age * 1.3) * tr.hw * 0.55
+            e.d += (dd - e.d) * min(1.0, dt * 2.0)
+            e.x, e.y, e.z, e.h = tr.pose_at(e.prog, e.d)
+        elif k == 'meteor':
+            fall = p.get('fall', 1.6)
+            tgt = self.race._find(e.target) if e.target is not None else None
+            if tgt is not None and e.age < fall - 0.35:
+                e.x, e.z, e.gy = tgt.x, tgt.z, tgt.y
+            e.y = e.gy + 40.0 * max(0.0, 1.0 - e.age / fall)
+            if e.age >= fall:
+                e.y = e.gy
+                self._explode(e)
+                return
+        e.life -= dt
+        if e.life <= 0:
+            if k in ('bomb', 'seeker', 'meteor'):
+                self._explode(e)
+            else:
+                e.dead = True
+
+    # ---- 봇 ---------------------------------------------------------------------------
+    def bot_think(self, rc, dt):
+        if self.race.phase != 'run' or rc.finished or rc.sim is None:
+            return
+        react = rc.brain.react if rc.brain is not None else 1.0
+        for slot in range(ITEM_SLOTS):
+            it = rc.items[slot]
+            if it is None or rc.roll[slot] > 0:
+                continue
+            rc.hold[slot] += dt
+            if rc.hold[slot] < react:
+                continue
+            if self._bot_wants(rc, it, rc.hold[slot]):
+                back = ITEMS[it]['kind'] in ('shot', 'bomb') and self._threat_behind(rc, 25.0) and not self._ahead(rc, 80.0)
+                self.use(rc, slot, back)
+                rc.hold[slot] = 0.0
+                return
+
+    def _threat_behind(self, rc, dist):
+        ds = self.track.ds
+        for o in self.race.racers:
+            if o is not rc and not o.finished:
+                gap = (rc.total - o.total) * ds
+                if 0 < gap < dist:
+                    return True
+        return False
+
+    def _bot_wants(self, rc, it, held):
+        item = ITEMS[it]
+        k = item['kind']
+        p = item['p']
+        s = rc.sim
+        tr = self.track
+        straight = tr.turn[s.q.idx] < 0.3
+        if k in ('boost', 'engine', 'hop', 'coin', 'grip', 'lucky'):
+            return straight or held > 6.0
+        if k in ('star', 'rocket', 'giant', 'warp', 'magnet'):
+            return straight or held > 4.0
+        if k == 'shield':
+            return held > 1.0
+        if k == 'cleanse':
+            return s.debuffed() or held > 8.0
+        if k == 'ghost':
+            return held > 2.5
+        if k in ('shot', 'boomerang'):
+            h = rc.h
+            sh, ch = math.sin(h), math.cos(h)
+            for o in self._ahead(rc, 70.0):
+                dx, dz = o.x - rc.x, o.z - rc.z
+                if dx * sh + dz * ch > 4.0 and abs(-dx * ch + dz * sh) < 3.5:
+                    return True
+            return held > 9.0 or self._threat_behind(rc, 20.0)
+        if k in ('homing', 'steal'):
+            return bool(self._ahead(rc, 160.0)) or held > 10.0
+        if k == 'swap':
+            return bool(self._ahead(rc, p['range'])) or held > 12.0
+        if k == 'bomb':
+            return bool(self._ahead(rc, 60.0)) or held > 8.0
+        if k in ('seeker', 'zap', 'meteor', 'tornado'):
+            return held > 2.0
+        if k == 'wave':
+            rr = (p['r'] * 0.8) ** 2
+            return any(o is not rc and not o.finished and (o.x - rc.x) ** 2 + (o.z - rc.z) ** 2 < rr for o in self.race.racers) or held > 10.0
+        if k == 'trap':
+            return self._threat_behind(rc, 30.0) or held > 7.0
+        return held > 5.0
+
+    # ---- 네트워크 ---------------------------------------------------------------------
+    def handle_message(self, m):
+        t = m.get('t')
+        race = self.race
+        try:
+            if t == 'ib':
+                i = int(m.get('b', -1))
+                if 0 <= i < len(self.boxes):
+                    b = self.boxes[i]
+                    if b['t'] <= 0:
+                        self.vfx.append(('box', b['x'], b['y'], b['z']))
+                    b['t'] = self.BOX_RESPAWN
+            elif t == 'iu':
+                it = m.get('it')
+                if not (isinstance(it, int) and 0 <= it < ITEM_COUNT):
+                    return
+                o = m.get('o')
+                for w in m.get('e', []):
+                    if self._get(w.get('i')) is None:
+                        sp = dict(w)
+                        self._spawn(o, it, sp, w.get('i'))
+                rc = race._find(o)
+                if rc is not None and ITEMS[it]['kind'] in ('boost',):
+                    self.vfx.append(('boost', o))
+            elif t == 'ih':
+                e = self._get(m.get('e'))
+                if e is not None:
+                    if m.get('boom'):
+                        self._explode(e)
+                    elif not ITEMS[e.item]['p'].get('persist'):
+                        e.dead = True
+                        self.vfx.append(('pop', e.x, e.y, e.z, ITEMS[e.item]['c1']))
+                    loc = race.local
+                    v = race._find(m.get('v'))
+                    if loc is not None and e.owner == loc.id and v is not None and v is not loc:
+                        race.ev(('item', 'score', v.name, e.item))
+            elif t == 'ia':
+                k = m.get('k')
+                tg = m.get('tg', []) or []
+                if k == 'swap':
+                    pos = m.get('pos')
+                    for rid in tg:
+                        rc = race._find(rid)
+                        if rc is not None and rc.sim is not None and pos:
+                            self.vfx.append(('warp', rc.x, rc.y, rc.z))
+                            rc.sim.teleport(float(pos[0]), float(pos[1]), float(pos[2]))
+                            self._ev(rc, ('item', 'hit', 'swap', m.get('it')))
+                elif k == 'steal':
+                    for rid in tg:
+                        rc = race._find(rid)
+                        if rc is not None and rc.sim is not None:
+                            slots = [s for s in range(ITEM_SLOTS) if rc.items[s] is not None and rc.roll[s] <= 0]
+                            if slots:
+                                s = slots[int(self.rng() * len(slots)) % len(slots)]
+                                took, uses = rc.items[s], rc.uses[s]
+                                rc.items[s] = None
+                                rc.uses[s] = 0
+                                self._ev(rc, ('item', 'stolen', took))
+                                self._send({'t': 'ig', 'to': m.get('o'), 'it': took, 'u': uses})
+                else:
+                    self._apply_area(m.get('o'), m.get('it'), tg)
+            elif t == 'ig':
+                rc = race._find(m.get('to'))
+                it = m.get('it')
+                if rc is not None and rc.sim is not None and isinstance(it, int) and 0 <= it < ITEM_COUNT:
+                    self.give(rc, it, m.get('u'), 0.4)
+        except (TypeError, ValueError, KeyError):
+            pass
+
+    def take_vfx(self):
+        v = self.vfx
+        self.vfx = []
+        return v
+
+
+def hue_rgb(h):
+    """0..1 색상환 -> 선명한 RGB (무적 스타 무지개 효과 등)"""
+    h = (h % 1.0) * 6.0
+    i = int(h)
+    f = h - i
+    q = int(255 * (1 - f))
+    t = int(255 * f)
+    return [(255, t, 0), (q, 255, 0), (0, 255, t), (0, q, 255), (t, 0, 255), (255, 0, q)][i % 6]
+
+
+def fx_status(s, lang='ko'):
+    """HUD 에 보여줄 내 카트 상태 목록 [(글자, 색), ...]"""
+    ko = lang == 'ko'
+    out = []
+
+    def add(t, a, b, col):
+        if t > 0:
+            out.append(('%s %.1f' % (a if ko else b, t), col))
+    add(s.star_t, '무적', 'STAR', (255, 220, 60))
+    add(s.auto_t, '로켓', 'ROCKET', (255, 130, 90))
+    add(s.ghost_t, '유령', 'GHOST', (225, 230, 255))
+    add(s.giant_t, '거대화', 'GIANT', (255, 150, 150))
+    if s.shield_n > 0:
+        out.append((('방패 x%d' if ko else 'SHIELD x%d') % s.shield_n, (120, 210, 255)))
+    add(s.engine_t, '엔진', 'ENGINE', (160, 230, 255))
+    add(s.magnet_t, '자석', 'MAGNET', (255, 130, 130))
+    add(s.grip_t, '타이어', 'TIRES', (255, 200, 90))
+    add(s.immune_t, '보호', 'SAFE', (200, 255, 200))
+    add(s.shrink_t, '축소', 'SHRUNK', (255, 255, 140))
+    add(s.slow_t, '감속', 'SLOW', (255, 170, 90))
+    add(s.slide_t, '미끄러짐', 'SLIPPERY', (170, 200, 255))
+    add(s.freeze_t, '빙결', 'FROZEN', (175, 225, 255))
+    add(s.stun_t, '엔진 정지', 'STUNNED', (255, 140, 60))
+    add(s.rev_t, '조작 반전', 'REVERSED', (210, 140, 255))
+    add(s.blind_t, '시야 가림', 'BLINDED', (190, 190, 200))
+    if s.coins > 0:
+        out.append((('코인 %d' if ko else 'COINS %d') % s.coins, (255, 214, 40)))
+    return out
+
+
+def incoming_threat(race):
+    """내 카트를 노리는 유도/1등추적/메테오가 날아오는 중인가"""
+    if race.items is None or race.local is None:
+        return None
+    lid = race.local.id
+    for e in race.items.ents:
+        if e.target == lid and e.kind in ('homing', 'seeker', 'meteor') and not e.dead:
+            return e
+    return None
+
+
+def ent_boxes(it):
+    """날아가는 아이템의 3D 박스 모델 (로컬: x 오른쪽, y 위, z 앞) - 두 프론트엔드 공용"""
+    c1, c2 = it['c1'], it['c2']
+    icon = it['icon']
+    if icon == 'missile':
+        return [(0, 0, 0, 0.28, 0.28, 0.75, c1, 1, 1, False), (0, 0, 0.92, 0.2, 0.2, 0.18, c2, 0.4, 0.4, False),
+                (0, 0, -0.6, 0.62, 0.05, 0.16, c2, 1, 1, False), (0, 0, -0.86, 0.15, 0.15, 0.08, (255, 200, 60), 1, 1, True)]
+    if icon == 'arrow':
+        return [(0, 0, 0, 0.06, 0.06, 0.95, c2, 1, 1, False), (0, 0, 1.05, 0.24, 0.08, 0.24, c1, 0.15, 1, False),
+                (0, 0, -0.9, 0.22, 0.04, 0.12, c1, 1, 1, False)]
+    if icon == 'drone':
+        return [(0, 0.1, 0, 1.0, 0.04, 0.08, (110, 116, 130), 1, 1, False), (0, 0.1, 0, 0.08, 0.04, 1.0, (110, 116, 130), 1, 1, False),
+                (0, 0, 0, 0.45, 0.2, 0.45, c1, 1, 1, False), (0, 0.02, 0.46, 0.14, 0.08, 0.02, c2, 1, 1, True)]
+    if icon == 'bird':
+        return [(0, 0.1, -0.1, 1.4, 0.05, 0.36, c2, 1, 1, False), (0, 0, 0, 0.3, 0.26, 0.7, c1, 1, 1, False),
+                (0, 0.16, 0.78, 0.2, 0.2, 0.2, c1, 1, 1, False)]
+    if icon == 'shuriken':
+        return [(0, 0, 0, 0.85, 0.05, 0.18, c1, 1, 1, False), (0, 0, 0, 0.18, 0.05, 0.85, c1, 1, 1, False),
+                (0, 0.03, 0, 0.16, 0.06, 0.16, c2, 1, 1, False)]
+    if icon == 'boomerang':
+        return [(0.35, 0, 0, 0.62, 0.07, 0.16, c1, 1, 1, False), (0, 0, 0.35, 0.16, 0.07, 0.62, c1, 1, 1, False)]
+    return [(0, 0, 0, 0.5, 0.5, 0.5, c1, 1, 1, False)]
+
+
+def wall_boxes(it):
+    c1, c2 = it['c1'], it['c2']
+    return [(-1.3, 0.25, 0, 0.08, 0.25, 0.08, (120, 126, 140), 1, 1, False), (1.3, 0.25, 0, 0.08, 0.25, 0.08, (120, 126, 140), 1, 1, False),
+            (0, 0.8, 0, 1.9, 0.42, 0.2, c1, 1, 1, False), (-1.05, 0.8, 0.21, 0.25, 0.38, 0.01, c2, 1, 1, False),
+            (0, 0.8, 0.21, 0.25, 0.38, 0.01, c2, 1, 1, False), (1.05, 0.8, 0.21, 0.25, 0.38, 0.01, c2, 1, 1, False)]
 
 
 
@@ -2638,6 +4320,10 @@ class Renderer(object):
         self.labels = []
         self.shake = 0.0
         self.cam = Cam()
+        self.frame_no = 0
+        self.anim_t = 0.0
+        self.qfont_path = None
+        self.qcache = {}
         self.set_quality(quality, sw, sh)
 
     # ---- 해상도/품질 -------------------------------------------------------------------
@@ -2919,6 +4605,24 @@ class Renderer(object):
             sl_i = slot_map.get(o)
             if sl_i is not None:
                 items[sl_i].append((self._dp_of(tr.px[ai], tr.py[ai], tr.pz[ai]), 5, ai))
+        isys = getattr(race, 'items', None)
+        if isys is not None:
+            for b in isys.boxes:
+                if b['t'] > 0.0:
+                    continue
+                o = ((b['idx'] - focus_idx) * dirn + half) % N - half
+                sl_i = slot_map.get(o)
+                if sl_i is not None:
+                    dpb = self._dp_of(b['x'], b['y'], b['z'])
+                    if dpb > 1.5:
+                        items[sl_i].append((dpb, 6, b))
+            for e in isys.ents:
+                o = ((e.hint - focus_idx) * dirn + half) % N - half
+                sl_i = slot_map.get(o)
+                if sl_i is not None:
+                    dpe = self._dp_of(e.x, e.y, e.z)
+                    if dpe > 1.2:
+                        items[sl_i].append((dpe + (0.0 if e.kind != 'trap' else 0.3), 7, e))
 
         poly = self.poly
         prev = None
@@ -2988,8 +4692,12 @@ class Renderer(object):
                             self._draw_lamp(it[2], lv)
                         elif code == 4:
                             self._draw_gate()
-                        else:
+                        elif code == 5:
                             self._draw_arch(it[2])
+                        elif code == 6:
+                            self._draw_ibox(it[2], it[0])
+                        else:
+                            self._draw_ent(it[2], it[0])
             prev = pts
             prev_i = i
 
@@ -3109,24 +4817,25 @@ class Renderer(object):
         self.draw_boxes(org, Rv, up, T, self.gate_boxes, 1.0)
 
     # ---- 카트 -----------------------------------------------------------------------------------------
-    def draw_boxes(self, org, Rv, Uv, Fv, boxes, shade, lod_fog=0):
-        """박스 목록을 (org, R/U/F 기저)에서 3D 로 그린다. 각 박스: 보이는 면만 칠함."""
+    def draw_boxes(self, org, Rv, Uv, Fv, boxes, shade, lod_fog=0, scale=1.0, tint=None):
+        """박스 목록을 (org, R/U/F 기저)에서 3D 로 그린다. 각 박스: 보이는 면만 칠함. scale = 크기 배율, tint = (색, 섞는 양)"""
         c = self.cam
         f, hx, hy, near = self.f, self.hx, self.hy, self.near
         csy, ccy, csp, ccp = c.sy, c.cy, c.sp, c.cp
         ox, oy, oz = org[0] - c.x, org[1] - c.y, org[2] - c.z
         # 월드 벡터 -> 카메라 좌표 (x, y, depth)
 
-        def cam_vec(v):
+        def cam_vec(v, k=1.0):
             xr = -v[0] * ccy + v[2] * csy
             zr = v[0] * csy + v[2] * ccy
-            return (xr, v[1] * ccp + zr * csp, zr * ccp - v[1] * csp)
+            return (xr * k, (v[1] * ccp + zr * csp) * k, (zr * ccp - v[1] * csp) * k)
         O = cam_vec((ox, oy, oz))
-        Rc, Uc, Fc = cam_vec(Rv), cam_vec(Uv), cam_vec(Fv)
-        # 카메라의 로컬 좌표
-        clx = -(ox * Rv[0] + oy * Rv[1] + oz * Rv[2])
-        cly = -(ox * Uv[0] + oy * Uv[1] + oz * Uv[2])
-        clz = -(ox * Fv[0] + oy * Fv[1] + oz * Fv[2])
+        Rc, Uc, Fc = cam_vec(Rv, scale), cam_vec(Uv, scale), cam_vec(Fv, scale)
+        # 카메라의 로컬 좌표 (모델 단위)
+        inv = 1.0 / scale
+        clx = -(ox * Rv[0] + oy * Rv[1] + oz * Rv[2]) * inv
+        cly = -(ox * Uv[0] + oy * Uv[1] + oz * Uv[2]) * inv
+        clz = -(ox * Fv[0] + oy * Fv[1] + oz * Fv[2]) * inv
         order = []
         for bx in boxes:
             dcen = O[2] + Rc[2] * bx[0] + Uc[2] * bx[1] + Fc[2] * bx[2]
@@ -3163,6 +4872,8 @@ class Renderer(object):
                 if not vis[name]:
                     continue
                 cc = col if glow else shade_rgb(col, k * shade)
+                if tint is not None:
+                    cc = mix_rgb(cc, tint[0], tint[1])
                 self.poly(cc, [corners[i] for i in ids])
 
     def _draw_kart(self, rc, dp, lv):
@@ -3171,6 +4882,8 @@ class Renderer(object):
         m = self.model(rc.kart_id)
         if dp < (1.0 if rc.kind == 'local' else 3.2):
             return
+        fxb = rc.fx
+        sc = rc.scale
         h = rc.h
         up = rc.up
         fx, fz = math.sin(h), math.cos(h)
@@ -3180,46 +4893,59 @@ class Renderer(object):
         fl = math.sqrt(Fv[0] ** 2 + Fv[1] ** 2 + Fv[2] ** 2) or 1.0
         Fv = (Fv[0] / fl, Fv[1] / fl, Fv[2] / fl)
         Rv = (Fv[1] * up[2] - Fv[2] * up[1], Fv[2] * up[0] - Fv[0] * up[2], Fv[0] * up[1] - Fv[1] * up[0])   # F x U
-        org = (rc.x, rc.y, rc.z)
+        gnd = (rc.x, rc.y, rc.z)
+        org = (rc.x, rc.y + rc.air_y, rc.z)
         amb = 0.7 if tg.night else 1.0
-        # 드리프트: 차체를 진행 방향에서 약간 틀어 보이게 (차체만 회전)
-        yaw_off = 0.0
+        tint = None
+        if fxb & FX_STAR:
+            tint = (hue_rgb(self.anim_t * 2.2), 0.5)
+        elif fxb & FX_FREEZE:
+            tint = ((175, 225, 255), 0.6)
+        elif fxb & FX_SHRINK and fxb & FX_SPIN:
+            tint = ((255, 255, 160), 0.35)
+        # 드리프트/스핀: 차체를 진행 방향에서 틀어 보이게 (차체만 회전)
+        yaw_off = rc.spin_ang
         if rc.drifting:
-            yaw_off = -rc.drift_dir * 0.3
+            yaw_off += -rc.drift_dir * 0.3
         elif abs(rc.slip) > 1.0:
-            yaw_off = clamp(-rc.slip * 0.02, -0.25, 0.25)
+            yaw_off += clamp(-rc.slip * 0.02, -0.25, 0.25)
         if yaw_off:
             cs, sn = math.cos(yaw_off), math.sin(yaw_off)
             Fn = tuple(Fv[i] * cs + Rv[i] * sn for i in range(3))
             Rn = tuple(Rv[i] * cs - Fv[i] * sn for i in range(3))
             Fv, Rv = Fn, Rn
-        # 그림자
+        # 그림자 (공중이면 작아짐)
         if dp < qp['lod1']:
-            L, W = m.L, m.W
+            L, W = m.L * sc, m.W * sc
+            ks = 1.0 / (1.0 + rc.air_y * 0.25)
             pts = []
             for a in range(8):
                 t = a * TAU / 8
-                lx, lz = math.cos(t) * W * 0.66, math.sin(t) * L * 0.62
-                pts.append(self.proj(org[0] + Rv[0] * lx + Fv[0] * lz, org[1] + 0.05 + Rv[1] * lx + Fv[1] * lz, org[2] + Rv[2] * lx + Fv[2] * lz))
+                lx, lz = math.cos(t) * W * 0.66 * ks, math.sin(t) * L * 0.62 * ks
+                pts.append(self.proj(gnd[0] + Rv[0] * lx + Fv[0] * lz, gnd[1] + 0.05 + Rv[1] * lx + Fv[1] * lz, gnd[2] + Rv[2] * lx + Fv[2] * lz))
             base_col = tg.pal['grass_a' if rc.offroad else 'road_a'][lv]
             self.poly(shade_rgb(base_col, 0.5), pts)
+        if (fxb & FX_GHOST) and (self.frame_no // 3) % 2 == 0:
+            return                                    # 유령: 깜빡임
         if dp > qp['lod1'] * 1.9:
             # 아주 먼 카트: 색 점
             p = self.proj(org[0], org[1] + 0.7, org[2])
             if p[2] > self.near:
-                r = max(1, int(self.f * 1.0 / p[2]))
-                pygame.draw.rect(self.surf, m.main, (int(p[0] - r), int(p[1] - r), r * 2 + 1, r + 1))
+                r = max(1, int(self.f * 1.0 * sc / p[2]))
+                pygame.draw.rect(self.surf, m.main if tint is None else tint[0], (int(p[0] - r), int(p[1] - r), r * 2 + 1, r + 1))
             return
         lod0 = dp < qp['lod0']
         # 부스트 불꽃
         if rc.boosting and dp < qp['lod1']:
-            L = m.L
-            ah = m.base + m.H * 0.3
+            L = m.L * sc
+            ah = (m.base + m.H * 0.3) * sc
             anc = (org[0] - Fv[0] * (L / 2) + up[0] * ah, org[1] - Fv[1] * (L / 2) + up[1] * ah, org[2] - Fv[2] * (L / 2) + up[2] * ah)
+            big = 1.6 if fxb & FX_AUTO else 1.0
             for ln, col in ((1.9, (255, 140, 30)), (1.1, (255, 230, 120))):
-                ln = ln * (0.8 + 0.4 * random_f())
-                pa = self.proj(anc[0] + Rv[0] * 0.2, anc[1] + Rv[1] * 0.2, anc[2] + Rv[2] * 0.2)
-                pb = self.proj(anc[0] - Rv[0] * 0.2, anc[1] - Rv[1] * 0.2, anc[2] - Rv[2] * 0.2)
+                ln = ln * (0.8 + 0.4 * random_f()) * sc * big
+                w2 = 0.2 * sc * big
+                pa = self.proj(anc[0] + Rv[0] * w2, anc[1] + Rv[1] * w2, anc[2] + Rv[2] * w2)
+                pb = self.proj(anc[0] - Rv[0] * w2, anc[1] - Rv[1] * w2, anc[2] - Rv[2] * w2)
                 pt = self.proj(anc[0] - Fv[0] * ln, anc[1] - Fv[1] * ln, anc[2] - Fv[2] * ln)
                 self.poly(col, (pa, pb, pt))
         boxes = m.boxes if lod0 else m.boxes_lod1
@@ -3230,31 +4956,43 @@ class Renderer(object):
         wheels_front = [w for w in m.wheels if w[2] > 0]
         first, second = (wheels_front, wheels_back) if cl < 0 else (wheels_back, wheels_front)
         for w in first:
-            self._draw_wheel(m, w, org, Rv, up, Fv, rc, lod0, amb)
-        self.draw_boxes(org, Rv, up, Fv, boxes, amb)
+            self._draw_wheel(m, w, org, Rv, up, Fv, rc, lod0, amb, sc)
+        self.draw_boxes(org, Rv, up, Fv, boxes, amb, 0, sc, tint)
         # 드라이버 헬멧
         hp = m.helmet
-        hxw = org[0] + Rv[0] * hp[0] + up[0] * hp[1] + Fv[0] * hp[2]
-        hyw = org[1] + Rv[1] * hp[0] + up[1] * hp[1] + Fv[1] * hp[2]
-        hzw = org[2] + Rv[2] * hp[0] + up[2] * hp[1] + Fv[2] * hp[2]
+        hxw = org[0] + (Rv[0] * hp[0] + up[0] * hp[1] + Fv[0] * hp[2]) * sc
+        hyw = org[1] + (Rv[1] * hp[0] + up[1] * hp[1] + Fv[1] * hp[2]) * sc
+        hzw = org[2] + (Rv[2] * hp[0] + up[2] * hp[1] + Fv[2] * hp[2]) * sc
         hp_ = self.proj(hxw, hyw, hzw)
         if hp_[2] > self.near:
-            r = max(2, int(self.f * 0.28 / hp_[2]))
-            pygame.draw.circle(self.surf, shade_rgb(m.main, amb * 0.8), (int(hp_[0]), int(hp_[1])), r)
-            pygame.draw.circle(self.surf, shade_rgb(m.main, amb * 1.3), (int(hp_[0] - r * 0.3), int(hp_[1] - r * 0.3)), max(1, r // 2))
+            hcol = m.main if tint is None else mix_rgb(m.main, tint[0], tint[1])
+            r = max(2, int(self.f * 0.28 * sc / hp_[2]))
+            pygame.draw.circle(self.surf, shade_rgb(hcol, amb * 0.8), (int(hp_[0]), int(hp_[1])), r)
+            pygame.draw.circle(self.surf, shade_rgb(hcol, amb * 1.3), (int(hp_[0] - r * 0.3), int(hp_[1] - r * 0.3)), max(1, r // 2))
             if cl > 0 and lod0:
                 pygame.draw.rect(self.surf, (12, 12, 14), (int(hp_[0] - r * 0.7), int(hp_[1] - r * 0.15), max(2, int(r * 1.4)), max(1, int(r * 0.45))))
         for w in second:
-            self._draw_wheel(m, w, org, Rv, up, Fv, rc, lod0, amb)
+            self._draw_wheel(m, w, org, Rv, up, Fv, rc, lod0, amb, sc)
+        # 방패: 카트를 감싸는 비눗방울
+        if fxb & FX_SHIELD:
+            ch = (m.base + m.H * 0.6) * sc
+            cp_ = self.proj(org[0] + up[0] * ch, org[1] + up[1] * ch, org[2] + up[2] * ch)
+            if cp_[2] > self.near:
+                r = int(self.f * max(m.L, m.W * 1.4) * 0.72 * sc / cp_[2])
+                if 3 < r < 900:
+                    pygame.draw.circle(self.surf, (120, 220, 255), (int(cp_[0]), int(cp_[1])), r, max(1, r // 14))
+                    pygame.draw.circle(self.surf, (235, 250, 255), (int(cp_[0] - r * 0.35), int(cp_[1] - r * 0.4)), max(1, r // 7))
         # 이름표
         if rc.kind != 'local' and 14 < dp < 150:
-            p = self.proj(org[0] + up[0] * 2.4, org[1] + up[1] * 2.4, org[2] + up[2] * 2.4)
+            k2 = 2.4 * sc
+            p = self.proj(org[0] + up[0] * k2, org[1] + up[1] * k2, org[2] + up[2] * k2)
             if p[2] > self.near:
                 self.labels.append((p[0], p[1], rc.name, (255, 210, 120) if rc.kind == 'bot' else (150, 232, 255), dp))
 
-    def _draw_wheel(self, m, w, org, Rv, Uv, Fv, rc, lod0, amb):
+    def _draw_wheel(self, m, w, org, Rv, Uv, Fv, rc, lod0, amb, sc=1.0):
         lx, ly, lz, sgn, front = w
-        R, ww = m.wheel_r, m.wheel_w
+        lx, ly, lz = lx * sc, ly * sc, lz * sc
+        R, ww = m.wheel_r * sc, m.wheel_w * sc
         if not lod0:
             self.draw_boxes(org, Rv, Uv, Fv, [(lx, ly, lz, ww / 2, R, R, (26, 26, 30), 1, 1, False)], amb)
             return
@@ -3313,9 +5051,210 @@ class Renderer(object):
     def _wheel_phase(self, rc):
         return (rc.total * self.track.ds / 0.4) % TAU if self.track is not None else 0.0
 
+    # ---- 아이템전: 상자 / 투사체 / 함정 ------------------------------------------------------------------
+    def set_qmark_font(self, path):
+        self.qfont_path = path
+        self.qcache = {}
+
+    def _qmark(self, px):
+        px = int(clamp(px, 6, 150))
+        px -= px % 2
+        if px in self.qcache:
+            return self.qcache[px]
+        try:
+            g = pygame.font.Font(self.qfont_path, px).render('?', True, (255, 255, 255))
+        except Exception:
+            g = None
+        if len(self.qcache) > 60:
+            self.qcache.clear()
+        self.qcache[px] = g
+        return g
+
+    @staticmethod
+    def _yaw_basis(ang):
+        c, s_ = math.cos(ang), math.sin(ang)
+        return (-c, 0.0, s_), (0.0, 1.0, 0.0), (s_, 0.0, c)
+
+    def _cube_box(self, x, y, z, ang, half, col, dp, qmark=True):
+        Rv, Uv, Fv = self._yaw_basis(ang)
+        self.draw_boxes((x, y, z), Rv, Uv, Fv, [(0, 0, 0, half, half, half, col, 1, 1, False)], 1.0)
+        if qmark and dp < 80:
+            p = self.proj(x, y, z)
+            if p[2] > self.near:
+                q = self._qmark(self.f * half * 1.7 / p[2])
+                if q is not None:
+                    self.surf.blit(q, (int(p[0] - q.get_width() / 2), int(p[1] - q.get_height() / 2)))
+
+    def _draw_ibox(self, b, dp):
+        t = self.anim_t
+        bob = math.sin(t * 3.0 + b['ph']) * 0.18
+        self._cube_box(b['x'], b['y'] + bob, b['z'], b['ph'] + t * 1.8, 0.8, hue_rgb(t * 0.25 + b['ph'] / TAU), dp)
+
+    def _ground_poly(self, cx, cy, cz, pts, col, rot=0.0):
+        """지면 위 평면 다각형. pts = (옆, 앞) 로컬 좌표"""
+        c, s_ = math.cos(rot), math.sin(rot)
+        self.poly(col, [self.proj(cx - lx * c + lz * s_, cy, cz + lx * s_ + lz * c) for (lx, lz) in pts])
+
+    def _ground_ring(self, cx, cy, cz, r, col, n=18, width=2):
+        pts = []
+        for i in range(n):
+            a = TAU * i / n
+            p = self.proj(cx + math.cos(a) * r, cy, cz + math.sin(a) * r)
+            if p[2] <= self.near:
+                return
+            pts.append((p[0], p[1]))
+        pygame.draw.lines(self.surf, col, True, pts, width)
+
+    def _ball(self, x, y, z, r, col, hl=None):
+        p = self.proj(x, y, z)
+        if p[2] <= self.near:
+            return None
+        rp = int(self.f * r / p[2])
+        if rp > 700 or not (-rp <= p[0] <= self.rw + rp and -rp <= p[1] <= self.rh + rp):
+            return p
+        pygame.draw.circle(self.surf, col, (int(p[0]), int(p[1])), max(1, rp))
+        if hl is not None and rp >= 3:
+            pygame.draw.circle(self.surf, hl, (int(p[0] - rp * 0.35), int(p[1] - rp * 0.35)), max(1, rp // 3))
+        return p
+
+    _BLOB = (1.0, 0.85, 1.05, 0.9, 1.12, 0.8, 1.0, 0.92, 1.08, 0.86, 1.02, 0.9)
+
+    def _ent_boxes(self, it):
+        key = ('eb', it['id'])
+        bx = self.models.get(key)
+        if bx is None:
+            bx = self.models[key] = ent_boxes(it)
+        return bx
+
+    def _draw_ent(self, e, dp):
+        it = ITEMS[e.item]
+        c1, c2 = it['c1'], it['c2']
+        icon = it['icon']
+        k = e.kind
+        t = self.anim_t
+        if k == 'trap':
+            self._draw_trap(e, it, dp)
+            return
+        if k == 'tornado':
+            for i in range(5):
+                w = 1.0 + i * 0.75
+                p = self.proj(e.x + math.sin(t * 9 + i) * 0.35 * i, e.y + 0.3 + i * 1.15, e.z + math.cos(t * 9 + i) * 0.35 * i)
+                if p[2] > self.near:
+                    rw = int(self.f * w / p[2])
+                    rh = max(1, int(rw * 0.32))
+                    if 1 < rw < 800:
+                        pygame.draw.ellipse(self.surf, c1 if i % 2 == 0 else c2, (int(p[0] - rw), int(p[1] - rh), rw * 2, rh * 2), max(1, rh // 2))
+            return
+        if k == 'meteor':
+            self._ground_ring(e.x, e.gy + 0.15, e.z, it['p'].get('r', 5.0), (255, 70, 40) if int(t * 8) % 2 else (255, 200, 60))
+            p0 = self.proj(e.x, e.y + 7.0, e.z)
+            p1 = self.proj(e.x, e.y, e.z)
+            if p0[2] > self.near and p1[2] > self.near:
+                pygame.draw.line(self.surf, (255, 190, 60), (p0[0], p0[1]), (p1[0], p1[1]), int(clamp(self.f * 0.9 / p1[2], 1, 40)))
+            self._ball(e.x, e.y, e.z, 1.6, c1, (255, 230, 120))
+            return
+        if k == 'seeker':
+            fx_, fz_ = math.sin(e.h), math.cos(e.h)
+            rx_, rz_ = -fz_, fx_
+            flap = math.sin(t * 22) * 0.45
+            for sg in (-1, 1):
+                a = self.proj(e.x + rx_ * sg * 0.6, e.y, e.z + rz_ * sg * 0.6)
+                b = self.proj(e.x + rx_ * sg * 2.3, e.y + 0.6 + flap, e.z + rz_ * sg * 2.3)
+                c = self.proj(e.x + rx_ * sg * 1.2 - fx_ * 0.9, e.y - 0.1, e.z + rz_ * sg * 1.2 - fz_ * 0.9)
+                self.poly(c2, (a, b, c))
+            self._ball(e.x, e.y, e.z, 1.0, c1, (255, 255, 255))
+            return
+        if k == 'bomb':
+            p = self._ball(e.x, e.y, e.z, 0.8, c1, (100, 100, 112))
+            if p is not None and p[2] > self.near:
+                blink = e.state == 1 and int(t * (6 + e.age * 12)) % 2 == 0
+                pygame.draw.circle(self.surf, (255, 50, 40) if blink else c2, (int(p[0]), int(p[1] - self.f * 0.85 / p[2])), max(1, int(self.f * 0.24 / p[2])))
+            return
+        if icon == 'laser':
+            p0 = self.proj(e.x, e.y, e.z)
+            sp = math.hypot(e.vx, e.vz) or 1.0
+            p1 = self.proj(e.x - e.vx / sp * 8.0, e.y, e.z - e.vz / sp * 8.0)
+            if p0[2] > self.near and p1[2] > self.near:
+                wpx = int(clamp(self.f * 0.35 / p0[2], 1, 16))
+                pygame.draw.line(self.surf, c1, (p0[0], p0[1]), (p1[0], p1[1]), wpx * 2)
+                pygame.draw.line(self.surf, (255, 255, 255), (p0[0], p0[1]), (p1[0], p1[1]), wpx)
+            return
+        if icon in ('missile', 'arrow', 'drone', 'bird', 'shuriken', 'boomerang'):
+            ang = (t * 20.0) if icon in ('shuriken', 'boomerang') else e.h
+            Rv, Uv, Fv = self._yaw_basis(ang)
+            self.draw_boxes((e.x, e.y, e.z), Rv, Uv, Fv, self._ent_boxes(it), 1.0)
+            return
+        if icon == 'bee':
+            for i in range(5):
+                a = t * 11 + i * 1.26
+                self._ball(e.x + math.cos(a) * 0.9, e.y + math.sin(a * 1.7) * 0.4, e.z + math.sin(a) * 0.9, 0.32, c1, c2)
+            return
+        p = self._ball(e.x, e.y, e.z, 0.75, c1, (255, 255, 255) if icon != 'ball' else c2)
+        if icon == 'target' and p is not None and p[2] > self.near:
+            rp = int(self.f * 0.75 / p[2])
+            if 3 < rp < 600:
+                pygame.draw.circle(self.surf, c2, (int(p[0]), int(p[1])), rp, max(1, rp // 5))
+
+    def _draw_trap(self, e, it, dp):
+        p = it['p']
+        shape = p.get('shape')
+        c1, c2 = it['c1'], it['c2']
+        y = e.gy + 0.08
+        t = self.anim_t
+        r = e.r
+        if shape == 'banana':
+            k = 1.9 if p.get('big') else 1.0
+            arc = [-1.3 + 2.6 * i / 6.0 for i in range(7)]
+            pts = [(math.sin(a) * 0.8 * k, (math.cos(a) * 0.8 - 0.45) * k) for a in arc] + \
+                  [(math.sin(a) * 0.45 * k, (math.cos(a) * 0.45 - 0.45) * k) for a in reversed(arc)]
+            self._ground_poly(e.x, y + 0.14, e.z, pts, c1, e.h)
+            self._ground_poly(e.x, y + 0.15, e.z, [(-0.1 * k, 0.32 * k), (0.1 * k, 0.32 * k), (0.06 * k, 0.48 * k), (-0.06 * k, 0.48 * k)], (110, 76, 30), e.h)
+        elif shape in ('oil', 'glue'):
+            n = len(self._BLOB)
+            pts = [(math.cos(TAU * i / n) * r * self._BLOB[i], math.sin(TAU * i / n) * r * self._BLOB[i]) for i in range(n)]
+            self._ground_poly(e.x, y, e.z, pts, (22, 20, 30) if shape == 'oil' else c1, e.h)
+            self._ground_poly(e.x, y + 0.01, e.z, [(math.cos(TAU * i / 8) * r * 0.22 + r * 0.3, math.sin(TAU * i / 8) * r * 0.14 - r * 0.25) for i in range(8)], c2, e.h)
+        elif shape == 'ice':
+            self._ground_poly(e.x, y, e.z, [(math.cos(TAU * i / 6) * r, math.sin(TAU * i / 6) * r) for i in range(6)], c1, e.h)
+            self._ground_poly(e.x, y + 0.01, e.z, [(math.cos(TAU * i / 6) * r * 0.55, math.sin(TAU * i / 6) * r * 0.55) for i in range(6)], c2, e.h)
+        elif shape == 'spikes':
+            self._ground_poly(e.x, y, e.z, [(-r, -0.4), (r, -0.4), (r, 0.4), (-r, 0.4)], c2, e.h)
+            if dp < 60:
+                ch, sh_ = math.cos(e.h), math.sin(e.h)
+                for i in range(6):
+                    lx = -r + (i + 0.5) * 2 * r / 6.0
+                    bx, bz = e.x - lx * ch, e.z + lx * sh_
+                    a = self.proj(bx - 0.18 * ch, y, bz + 0.18 * sh_)
+                    b = self.proj(bx + 0.18 * ch, y, bz - 0.18 * sh_)
+                    c = self.proj(bx, y + 0.45, bz)
+                    self.poly(c1, (a, b, c))
+        elif shape == 'mine':
+            self._ground_poly(e.x, y, e.z, [(math.cos(TAU * i / 10) * 0.85, math.sin(TAU * i / 10) * 0.85) for i in range(10)], c1)
+            self._ground_poly(e.x, y + 0.12, e.z, [(math.cos(TAU * i / 10) * 0.5, math.sin(TAU * i / 10) * 0.5) for i in range(10)], (110, 116, 130))
+            self._ball(e.x, y + 0.3, e.z, 0.17, (255, 40, 40) if int(t * 4) % 2 else (90, 20, 20))
+        elif shape == 'fakebox':
+            self._cube_box(e.x, e.gy + 0.85, e.z, -t * 1.8 + e.h, 0.8, hue_rgb(t * 0.25 + 0.5), dp)
+        elif shape == 'wall':
+            Rv, Uv, Fv = self._yaw_basis(e.h)
+            self.draw_boxes((e.x, e.gy, e.z), Rv, Uv, Fv, wall_boxes(it), 1.0)
+        elif shape == 'portal':
+            ch, sh_ = math.cos(e.h), math.sin(e.h)
+            pts = []
+            for i in range(16):
+                a = TAU * i / 16 + t * 2.0
+                q = self.proj(e.x - math.cos(a) * 1.3 * ch, e.gy + 1.4 + math.sin(a) * 1.3, e.z + math.cos(a) * 1.3 * sh_)
+                if q[2] <= self.near:
+                    return
+                pts.append((q[0], q[1]))
+            w = int(clamp(self.f * 0.28 / max(dp, 1.0), 1, 20))
+            pygame.draw.lines(self.surf, c1, True, pts, w)
+            pygame.draw.lines(self.surf, c2, True, pts[::2], max(1, w // 2))
+
     # ---- 프레임 ----------------------------------------------------------------------------------------
     def render(self, race, cam_pos, focus_idx, dirn, boost_fx=0.0, speed_ratio=0.0, t=0.0):
         self.labels = []
+        self.frame_no += 1
+        self.anim_t = t
         self.cam.set(*cam_pos)
         self.draw_background()
         self.draw_world(race, focus_idx, dirn)
@@ -3842,11 +5781,201 @@ def draw_hud(app, surf, race, dt):
         ui.text(surf, T('역주행!', 'WRONG WAY!'), sw // 2, int(sh * 0.36), 50 * u, (255, 80, 90), 'c')
     now = time.time()
     app.toasts = [t for t in app.toasts if t[1] > now]
-    ty = int(sh * 0.16)
+    ty = int(max(sh * 0.16, getattr(app, 'hud_top', 0) + 6 * u))
     for text, until, color, big in app.toasts[-2:]:
-        a = clamp((until - now) * 3.0, 0.0, 1.0)
-        ui.text(surf, text, sw // 2, ty, (62 if big else 38) * u, color, 'c')
-        ty += int((70 if big else 46) * u)
+        size = (62 if big else 38) * u
+        w = ui.render(text, size, color).get_width()
+        if w > sw * 0.94:
+            size = max(10, size * sw * 0.94 / float(w))      # 화면보다 길면 글자를 줄인다
+        ui.text(surf, text, sw // 2, ty, size, color, 'c')
+        ty += int((size + 8 * u) if not big else 70 * u)
+
+
+# ============================================================================
+#  [폰] 아이템전 UI: 벡터 아이콘 / 슬롯 3칸(키 1·2·3, 터치) / 룰렛 / 상태 표시 / 화면 효과(먹물·번쩍)
+# ============================================================================
+class ItemIcons(object):
+    """코어의 벡터 아이콘 정의(ICONS) -> pygame Surface (2배로 그려서 부드럽게 축소, 크기별 캐시)"""
+
+    def __init__(self):
+        self.cache = {}
+
+    def get(self, it, size):
+        size = max(8, int(size))
+        key = (it, size)
+        s = self.cache.get(key)
+        if s is None:
+            if len(self.cache) > 320:
+                self.cache.clear()
+            s = self.cache[key] = self._make(ITEMS[it], size)
+        return s
+
+    @staticmethod
+    def _draw(surf, item, prims, h, k, off, shadow):
+        def P(x, y):
+            return (h + x * k + off, h + y * k + off)
+        for prim in prims:
+            t = prim[0]
+            if t == 'c':
+                col = (0, 0, 0, 110) if shadow else icon_color(item, prim[4])
+                pygame.draw.circle(surf, col, P(prim[1], prim[2]), max(1, int(prim[3] * k)))
+            elif t == 'e':
+                col = (0, 0, 0, 110) if shadow else icon_color(item, prim[5])
+                cx, cy = P(prim[1], prim[2])
+                rx, ry = max(1.0, prim[3] * k), max(1.0, prim[4] * k)
+                pygame.draw.ellipse(surf, col, (cx - rx, cy - ry, rx * 2, ry * 2))
+            elif t == 'r':
+                col = (0, 0, 0, 110) if shadow else icon_color(item, prim[5])
+                pygame.draw.circle(surf, col, P(prim[1], prim[2]), max(1, int(prim[3] * k + prim[4] * k / 2)), max(1, int(prim[4] * k)))
+            elif t == 'p':
+                col = (0, 0, 0, 110) if shadow else icon_color(item, prim[2])
+                pygame.draw.polygon(surf, col, [P(x, y) for x, y in prim[1]])
+            elif t == 'l':
+                col = (0, 0, 0, 110) if shadow else icon_color(item, prim[3])
+                w = max(1, int(prim[2] * k))
+                pts = [P(x, y) for x, y in prim[1]]
+                pygame.draw.lines(surf, col, False, pts, w)
+                for p in pts:
+                    pygame.draw.circle(surf, col, (int(p[0]), int(p[1])), max(1, w // 2))
+
+    def _make(self, item, size):
+        ss = size * 2
+        surf = pygame.Surface((ss, ss), pygame.SRCALPHA)
+        h = ss / 2.0
+        k = h * 0.86
+        prims = ICONS[item['icon']]
+        self._draw(surf, item, prims, h, k, max(1, ss // 28), True)
+        self._draw(surf, item, prims, h, k, 0, False)
+        try:
+            return pygame.transform.smoothscale(surf, (size, size))
+        except Exception:
+            return pygame.transform.scale(surf, (size, size))
+
+
+def item_bar_rects(app):
+    u = app.ui.u
+    W, H = app.W, app.H
+    S = int(64 * u)
+    gap = int(9 * u)
+    total = 3 * S + 2 * gap
+    x0 = W // 2 - total // 2
+    if app.landscape:
+        y0 = int(8 * u)
+    else:
+        ms = int(min(H * 0.34, 200 * u))
+        y0 = int(10 * u + ms + 34 * u)
+    return [pygame.Rect(x0 + i * (S + gap), y0, S, S) for i in range(ITEM_SLOTS)]
+
+
+def draw_item_bar(app, surf, race):
+    ui = app.ui
+    u = ui.u
+    rc = race.local
+    rects = item_bar_rects(app)
+    t = app.t
+    for i, r in enumerate(rects):
+        it = rc.items[i]
+        roll = rc.roll[i]
+        ready = it is not None and roll <= 0
+        ui.panel(surf, r, 215 if ready else 150, (18, 26, 52) if ready else (8, 12, 28), int(14 * u))
+        if ready:
+            pulse = 0.75 + 0.25 * math.sin(t * 6.0 + i)
+            bc = (int(255 * pulse), int(200 * pulse), 70)
+        else:
+            bc = (80, 92, 125)
+        rrect_outline(surf, bc, r, int(14 * u), max(2, int(3 * u)))
+        if it is not None:
+            if roll > 0:
+                show = (int(t * 16) * 37 + i * 11) % ITEM_COUNT          # 룰렛
+                ic = app.icons.get(show, r.w * 0.66)
+            else:
+                ic = app.icons.get(it, r.w * 0.8)
+            surf.blit(ic, (r.centerx - ic.get_width() // 2, r.centery - ic.get_height() // 2))
+            if ready and rc.uses[i] > 1:
+                ui.text(surf, 'x%d' % rc.uses[i], r.right - 4 * u, r.bottom - 24 * u, 20 * u, (255, 255, 255), 'r')
+            if ready:
+                name = item_name(it, LANG)
+                size = 14 * u
+                w = ui.render(name, size, (230, 236, 255)).get_width()
+                if w > r.w + 8 * u:
+                    size = max(8, size * (r.w + 8 * u) / float(w))
+                ui.text(surf, name, r.centerx, r.bottom + 2 * u, size, (230, 236, 255), 'c')
+        ui.text(surf, str(i + 1), r.x + 6 * u, r.y + 2 * u, 17 * u, (255, 220, 120))
+    app.hud_top = rects[0].bottom + 22 * u
+    # 상태 표시 (무적/방패/축소…)
+    st = fx_status(rc.sim, LANG)
+    if st:
+        x = rects[0].x
+        y = rects[0].bottom + 20 * u
+        for text, col in st[:4]:
+            tw = ui.render(text, 15 * u, col).get_width()
+            chip = pygame.Rect(int(x), int(y), int(tw + 14 * u), int(22 * u))
+            ui.panel(surf, chip, 170, (0, 0, 0), int(10 * u))
+            ui.text(surf, text, chip.x + 7 * u, chip.y + 2 * u, 15 * u, col, shadow=False)
+            x += chip.w + 6 * u
+        app.hud_top = y + 28 * u
+    # 날아오는 미사일 경고
+    thr = incoming_threat(race)
+    if thr is not None and int(t * 6) % 2 == 0:
+        ui.text(surf, T('! 미사일 접근 !', '! INCOMING !'), app.W // 2, int(app.hud_top), 30 * u, (255, 80, 80), 'c')
+    return rects
+
+
+def rrect_outline(surf, color, rect, r, width):
+    try:
+        pygame.draw.rect(surf, color, rect, width, border_radius=int(r))
+    except TypeError:
+        pygame.draw.rect(surf, color, rect, width)
+
+
+class ScreenFx(object):
+    """먹물(시야 가림)과 번개 번쩍임 - 큰 반투명 면은 미리 만들어 두고 투명도만 바꿔서 그린다"""
+
+    def __init__(self):
+        self.size = None
+        self.ink = None
+        self.veil = None
+        self.flash = 0.0
+        self.flash_col = (255, 255, 255)
+        self.seed = 1
+
+    def _ensure(self, W, H):
+        if self.size != (W, H):
+            self.size = (W, H)
+            self.ink = None
+            self.veil = pygame.Surface((W, H)).convert() if pygame.display.get_surface() is not None else pygame.Surface((W, H))
+
+    def _make_ink(self, W, H):
+        s = pygame.Surface((W, H), pygame.SRCALPHA)
+        rnd = Rng(self.seed)
+        base = min(W, H)
+        for _ in range(7):
+            cx, cy = W * (0.1 + rnd() * 0.8), H * (0.15 + rnd() * 0.75)
+            r = base * (0.12 + rnd() * 0.16)
+            pygame.draw.circle(s, (14, 12, 26, 245), (int(cx), int(cy)), int(r))
+            for _k in range(6):
+                a = rnd() * TAU
+                d = r * (0.8 + rnd() * 0.6)
+                pygame.draw.circle(s, (14, 12, 26, 245), (int(cx + math.cos(a) * d), int(cy + math.sin(a) * d)), int(r * (0.18 + rnd() * 0.25)))
+            pygame.draw.circle(s, (60, 52, 90, 255), (int(cx - r * 0.35), int(cy - r * 0.35)), max(2, int(r * 0.12)))
+        self.ink = s
+
+    def draw(self, surf, W, H, blind_t, dt):
+        self._ensure(W, H)
+        if blind_t > 0:
+            if self.ink is None:
+                self.seed += 1
+                self._make_ink(W, H)
+            a = int(255 * clamp(blind_t / 1.2, 0.0, 1.0))
+            self.ink.set_alpha(a)
+            surf.blit(self.ink, (0, 0))
+        elif self.ink is not None:
+            self.ink = None
+        if self.flash > 0:
+            self.veil.fill(self.flash_col)
+            self.veil.set_alpha(int(clamp(self.flash * 420, 0, 170)))
+            surf.blit(self.veil, (0, 0))
+            self.flash = max(0.0, self.flash - dt)
 
 
 # ============================================================================
@@ -3919,6 +6048,13 @@ class Sfx(object):
         S['finish'] = self._tone(520, 700, 0.3, 'tri', 2.0)
         S['click'] = self._tone(900, 40, 0.2, 'tri')
         S['drift'] = self._noise(260, 0.16, False, True)
+        S['iroll'] = self._tone(1300, 30, 0.12, 'square')
+        S['iget'] = self._tone(880, 150, 0.26, 'tri', 1.5)
+        S['iuse'] = self._noise(220, 0.3, True)
+        S['ihit'] = self._tone(190, 280, 0.45, 'square', 0.4)
+        S['iboom'] = self._noise(650, 0.55)
+        S['izap'] = self._tone(1500, 320, 0.25, 'square', 0.25)
+        S['iblock'] = self._tone(1250, 170, 0.26, 'tri', 1.2)
         for i, f0 in enumerate((58.0, 74.0, 95.0, 122.0, 156.0, 200.0)):
             dur = 0.2
             cycles = max(1, int(round(f0 * dur)))
@@ -3983,6 +6119,12 @@ def R(x, y, w, h):
     return pygame.Rect(int(x), int(y), int(w), int(h))
 
 
+ITEM_KEYS = {pygame.K_1: 0, pygame.K_2: 1, pygame.K_3: 2}
+for _n, _slot in (('K_KP1', 0), ('K_KP2', 1), ('K_KP3', 2), ('K_KP_1', 0), ('K_KP_2', 1), ('K_KP_3', 2)):
+    if hasattr(pygame, _n):
+        ITEM_KEYS[getattr(pygame, _n)] = _slot
+
+
 class ShowKart(object):
     """쇼룸(메뉴/차고 배경)에서 돌아가는 카트용 가짜 Racer + 가짜 Race"""
 
@@ -4031,6 +6173,12 @@ class App(object):
         self.sfx = Sfx(self.profile['sound'])
         self.session = Session(self.profile)
         self.renderer = Renderer(self.W, self.H, int(self.profile['quality']))
+        self.renderer.set_qmark_font(self.font_path)
+        self.icons = ItemIcons()
+        self.sfx_screen = ScreenFx()
+        self.hud_top = 0
+        self.brake_held = False
+        self.item_rects = []
         self.cam = ChaseCam()
         self.touch = TouchControls()
         self.touch.layout(self.W, self.H, self.profile['auto_gas'])
@@ -4151,14 +6299,16 @@ class App(object):
                         self.close_kb(r)
                     continue
                 self.keys.add(e.key)
-                if e.key in (pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_w, pygame.K_a, pygame.K_s, pygame.K_d, pygame.K_SPACE):
+                if e.key in (pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_w, pygame.K_a, pygame.K_s, pygame.K_d, pygame.K_SPACE) or e.key in ITEM_KEYS:
                     self.used_keyboard = True
                 if e.key in (pygame.K_UP, pygame.K_w):
                     self.used_gas_key = True          # 가속 키를 눌러 본 뒤부터 '직접 가속' (조향 키만으로는 바뀌지 않음)
                 if e.key in (pygame.K_ESCAPE, getattr(pygame, 'K_AC_BACK', -999)):
                     self.on_back()
                 elif self.scene == 'race':
-                    if e.key == pygame.K_r and self.race:
+                    if e.key in ITEM_KEYS:
+                        self.use_item(ITEM_KEYS[e.key])
+                    elif e.key == pygame.K_r and self.race:
                         self.race.respawn_local()
                     elif e.key == pygame.K_m:
                         self.sfx.enabled = not self.sfx.enabled
@@ -4213,6 +6363,7 @@ class App(object):
         gas = pygame.K_UP in k or pygame.K_w in k or 'gas' in pressed
         auto = self.profile['auto_gas'] and not self.used_gas_key
         drift = pygame.K_SPACE in k or pygame.K_LSHIFT in k or pygame.K_RSHIFT in k or 'drift' in pressed
+        self.brake_held = brake
         self.steer = steer_step(self.steer, tgt, dt, self.profile['steer_resp'])
         return {'steer': self.steer, 'throttle': 1.0 if (gas or (auto and not brake)) else 0.0, 'brake': 1.0 if brake else 0.0, 'drift': drift}, pressed
 
@@ -4220,11 +6371,16 @@ class App(object):
     def start_solo(self):
         p = self.profile
         entries = solo_entries(p.display_name(), p['kart'], int(p['bots']))
-        self.start_race(int(p['map']), int(p['laps']), entries, False, True, 5.0)
+        self.start_race(int(p['map']), int(p['laps']), entries, False, True, 5.0, p['mode'] == 'item')
 
-    def start_race(self, map_id, laps, entries, multi, is_host, countdown):
+    def use_item(self, slot):
+        if self.race is not None and self.race.items is not None and not (self.paused and not self.race.multi):
+            self.race.use_item(slot, self.brake_held)
+
+    def start_race(self, map_id, laps, entries, multi, is_host, countdown, items=False):
         self.loading(T('맵 생성 중…', 'Building map…') + ' #%d' % map_id)
-        self.race = Race(map_id, laps, entries, multi=multi, is_host=is_host, countdown=countdown, net=self.session.net if multi else None)
+        self.race = Race(map_id, laps, entries, multi=multi, is_host=is_host, countdown=countdown, net=self.session.net if multi else None, items=items)
+        self.hud_top = 0
         self.renderer.set_track(self.race.track)
         self.show_map = None
         self.cam.reset()
@@ -4238,7 +6394,13 @@ class App(object):
         self.dirn = 1
         self.scene = 'race'
         if not self.touch_visible() or not (_is_android() or self.ptr.has_touch):
-            self.toast(T('← → 조향   ↑ 가속   Space 드리프트   R 복귀', 'Left/Right steer   Up gas   Space drift   R reset'), 6.0, (255, 255, 255))
+            if items:
+                self.toast(T('← → 조향  ↑ 가속  Space 드리프트  1·2·3 아이템 (↓ 누른 채 = 뒤로)  R 복귀',
+                             'Steer ←→  Gas ↑  Drift Space  Items 1·2·3 (hold ↓ = throw back)  R reset'), 6.0, (255, 255, 255))
+            else:
+                self.toast(T('← → 조향   ↑ 가속   Space 드리프트   R 복귀', 'Left/Right steer   Up gas   Space drift   R reset'), 6.0, (255, 255, 255))
+        elif items:
+            self.toast(T('위쪽 아이템 칸을 눌러서 사용!', 'Tap the item slots at the top!'), 5.0, (255, 255, 255))
 
     def toggle_pause(self):
         if self.race is None:
@@ -4280,6 +6442,8 @@ class App(object):
                 self.toast(T('%s 결승!' % ev[1], '%s finished!' % ev[1]), 1.4, (200, 230, 255))
             elif kind == 'left':
                 self.toast(T('%s 퇴장' % ev[1], '%s left' % ev[1]), 1.4, (255, 150, 150))
+            elif kind == 'item':
+                self.on_item_event(ev)
             elif kind == 'sim':
                 e = ev[1]
                 if e in ('pad', 'miniturbo'):
@@ -4291,6 +6455,75 @@ class App(object):
                     self.renderer.shake = max(self.renderer.shake, 0.6)
                 elif e.startswith('tier'):
                     self.sfx.play('tier')
+
+    def on_item_event(self, ev):
+        what = ev[1]
+        if what == 'roll':
+            self.sfx.play('iroll', 0.5)
+        elif what == 'get':
+            self.sfx.play('iget')
+            self.toast('%s  ·  %s' % (item_name(ev[2], LANG), item_desc(ev[2], LANG)), 1.8, (200, 235, 255))
+        elif what == 'use':
+            self.sfx.play('iuse', 0.7)
+        elif what == 'hit':
+            self.sfx.play('ihit')
+            self.renderer.shake = max(self.renderer.shake, 0.9)
+            self.toast(fx_name(ev[2], LANG) + '!', 1.2, (255, 110, 110), True)
+        elif what == 'block':
+            self.sfx.play('iblock')
+            self.toast(T('방어!', 'BLOCKED!'), 1.0, (120, 220, 255), True)
+        elif what == 'score':
+            self.toast(T('명중! ', 'HIT! ') + str(ev[2]), 1.2, (255, 220, 90))
+        elif what == 'stolen':
+            self.toast(T('아이템을 도둑맞았어요: ', 'Item stolen: ') + item_name(ev[2], LANG), 1.6, (255, 150, 150))
+
+    def burst(self, x, y, z, n, cols, spd, size, life, up=4.0):
+        rd = self.renderer
+        for i in range(n):
+            a = _random.random() * TAU
+            v = spd * (0.4 + _random.random() * 0.6)
+            rd.emit(x, y, z, math.cos(a) * v, up * (0.3 + _random.random()), math.sin(a) * v, cols[i % len(cols)], size, life * (0.6 + _random.random() * 0.5))
+
+    def item_vfx(self, race, lst):
+        loc = race.local
+        for v in lst:
+            k = v[0]
+            if k == 'box':
+                self.burst(v[1], v[2], v[3], 14, [hue_rgb(i / 7.0) for i in range(7)], 7.0, 0.22, 0.6)
+            elif k == 'boom':
+                x, y, z, r, col = v[1], v[2], v[3], v[4], v[5]
+                self.burst(x, y + 0.5, z, 34, [(255, 150, 40), (255, 230, 120), (255, 70, 40), col], r * 1.6, 0.45, 0.8, 7.0)
+                d = math.hypot(loc.x - x, loc.z - z)
+                if d < r * 3.0:
+                    self.renderer.shake = max(self.renderer.shake, 1.0)
+                if d < 150:
+                    self.sfx.play('iboom', clamp(1.0 - d / 160.0, 0.15, 1.0))
+            elif k == 'ring':
+                x, y, z, r, col = v[1], v[2], v[3], v[4], v[5]
+                for i in range(26):
+                    a = TAU * i / 26
+                    self.renderer.emit(x + math.cos(a) * 1.5, y + 0.6, z + math.sin(a) * 1.5, math.cos(a) * r * 2.2, 1.5, math.sin(a) * r * 2.2, col, 0.4, 0.45)
+            elif k == 'hit':
+                self.burst(v[1], v[2] + 0.8, v[3], 12, [(255, 255, 255), (255, 220, 90)], 6.0, 0.22, 0.5)
+            elif k == 'block':
+                self.burst(v[1], v[2] + 0.8, v[3], 14, [(120, 220, 255), (255, 255, 255)], 7.0, 0.22, 0.5)
+            elif k == 'warp':
+                self.burst(v[1], v[2] + 0.8, v[3], 18, [(170, 90, 255), (60, 230, 255)], 5.0, 0.28, 0.7, 6.0)
+            elif k == 'pop':
+                self.burst(v[1], v[2], v[3], 8, [v[4], (255, 255, 255)], 5.0, 0.2, 0.4)
+            elif k == 'area':
+                it = ITEMS[v[1]]
+                if it['kind'] == 'zap':
+                    for rid in v[3]:
+                        rc = race._find(rid)
+                        if rc is not None:
+                            for j in range(9):
+                                self.renderer.emit(rc.x + (_random.random() - 0.5) * 1.2, rc.y + 1.0 + j * 1.4, rc.z + (_random.random() - 0.5) * 1.2,
+                                                   0.0, 0.0, 0.0, it['c1'] if j % 2 else (255, 255, 255), 0.35, 0.35)
+                    if loc.id in v[3] or it['p'].get('scope') == 'all' or v[2] == loc.id:
+                        self.sfx_screen.flash = 0.32
+                        self.sfx_screen.flash_col = it['c1'] if it['icon'] in ('bolt', 'cloud') else (255, 255, 255)
+                        self.sfx.play('izap', 0.8)
 
     def emit_fx(self, race, dt):
         rd = self.renderer
@@ -4346,6 +6579,8 @@ class App(object):
             race.update(dt, inp)
             self.handle_race_events(race)
             self.emit_fx(race, dt)
+            if race.items is not None:
+                self.item_vfx(race, race.items.take_vfx())
         loc = race.local
         sim = loc.sim
         self.renderer.update_particles(dt if not self.paused else 0.0)
@@ -4390,10 +6625,23 @@ class App(object):
         race = self.race
         ui = self.ui
         u = ui.u
+        if race.local is not None and race.local.sim is not None:
+            self.sfx_screen.draw(self.screen, self.W, self.H, race.local.sim.blind_t if race.items is not None else 0.0, dt)
+        if race.items is not None:
+            self.item_rects = draw_item_bar(self, self.screen, race)
+            for i, r in enumerate(self.item_rects):
+                if ui.tapped(r.inflate(int(10 * u), int(10 * u))):
+                    self.use_item(i)
+        else:
+            self.hud_top = 0
         draw_hud(self, self.screen, race, dt)
         if self.touch_visible():
             self.touch.draw(self.screen, ui, self.pressed)
-        pb = R(self.W // 2 - 22 * u, 8 * u, 44 * u, 40 * u)
+        if race.items is not None and self.landscape:
+            r3 = self.item_rects[-1]
+            pb = R(r3.right + 12 * u, 8 * u, 44 * u, 40 * u)
+        else:
+            pb = R(self.W // 2 - 22 * u, 8 * u, 44 * u, 40 * u)
         if ui.button(self.screen, pb, 'II', 'ghost', size=22 * u):
             self.toggle_pause()
         if self.paused:
@@ -4535,7 +6783,7 @@ class App(object):
         anc = 'l' if land else 'c'
         ui.text(surf, 'TURBO', x, int(self.H * 0.05), 96 * u, (255, 255, 255), anc)
         ui.text(surf, 'KART 3D', x, int(self.H * 0.05) + 86 * u, 70 * u, (255, 176, 32), anc)
-        ui.text(surf, T('맵 1000개 · 카트 100,000종 · WiFi 멀티', '1000 maps · 100,000 karts · WiFi multiplayer'), x, int(self.H * 0.05) + 160 * u, 20 * u, (205, 220, 250), anc)
+        ui.text(surf, T('맵 1000개 · 카트 100,000종 · 아이템 100종 · WiFi 멀티', '1000 maps · 100,000 karts · 100 items · WiFi multiplayer'), x, int(self.H * 0.05) + 160 * u, 20 * u, (205, 220, 250), anc)
         bw = self.W * 0.40 if land else self.W * 0.82
         bx = int(self.W * 0.06) if land else (self.W - bw) / 2
         by = self.H * 0.43 if land else self.H * 0.40
@@ -4577,7 +6825,15 @@ class App(object):
         d = ui.stepper(surf, R(x, y + 108 * u, w, 44 * u), T('AI 상대', 'AI rivals'), int(self.profile['bots']), 0, 11)
         if d:
             self.profile['bots'] = int(self.profile['bots']) + d
-        ui.text(surf, '%s #%d' % (kart_name(self.profile['kart'], LANG), self.profile['kart'] + 1), x, y + 166 * u, 18 * u, (190, 205, 240))
+        half = (w - 10 * u) / 2.0
+        item_mode = self.profile['mode'] == 'item'
+        if ui.button(surf, R(x, y + 160 * u, half, 40 * u), T('스피드전', 'Speed'), 'chip' if item_mode else 'chipon', size=19 * u):
+            self.profile['mode'] = 'speed'
+            self.profile.save()
+        if ui.button(surf, R(x + half + 10 * u, y + 160 * u, half, 40 * u), T('아이템전', 'Items'), 'chipon' if item_mode else 'chip', size=19 * u):
+            self.profile['mode'] = 'item'
+            self.profile.save()
+        ui.text(surf, '%s #%d' % (kart_name(self.profile['kart'], LANG), self.profile['kart'] + 1), x, y + 210 * u, 18 * u, (190, 205, 240))
         bh = min(70 * u, rr.h * 0.2)
         if ui.button(surf, R(x, rr.bottom - 14 * u - bh * 2 - 10 * u, w, bh), T('출발!', 'START!'), 'primary', size=bh * 0.5):
             self.profile['map'] = self.sel_map
@@ -4807,7 +7063,7 @@ class App(object):
             msg = ses.start_msg
             ses.start_msg = None
             entries = ses.entries_from_start(msg)
-            self.start_race(int(msg['map']), int(msg['laps']), entries, True, ses.is_host, float(msg.get('countdown', 5.0)))
+            self.start_race(int(msg['map']), int(msg['laps']), entries, True, ses.is_host, float(msg.get('countdown', 5.0)), bool(msg.get('items')))
             return
         if ses.state == 'idle':
             self.err = ses.error or T('연결이 끊어졌어요', 'Disconnected')
@@ -4849,26 +7105,35 @@ class App(object):
             return
         # 오른쪽: 설정
         st = ses.settings
-        mid = self.map_picker(R(rr.x, rr.y, rr.w, rr.h - 150 * u), int(st['map']), editable=ses.is_host)
+        mid = self.map_picker(R(rr.x, rr.y, rr.w, rr.h - 196 * u), int(st['map']), editable=ses.is_host)
         if ses.is_host and mid != st['map']:
             ses.send_settings(map=mid)
             self.profile['map'] = mid
-        ui.panel(surf, R(rr.x, rr.bottom - 140 * u, rr.w, 140 * u), 205)
-        sx, sy, sw_ = rr.x + 14 * u, rr.bottom - 134 * u, rr.w - 28 * u
+        ui.panel(surf, R(rr.x, rr.bottom - 186 * u, rr.w, 186 * u), 205)
+        sx, sy, sw_ = rr.x + 14 * u, rr.bottom - 180 * u, rr.w - 28 * u
         half = (sw_ - 12 * u) / 2.0
         d1 = ui.stepper(surf, R(sx, sy + 4 * u, half, 38 * u), T('바퀴', 'Laps'), int(st['laps']), 1, 10) if ses.is_host else 0
         d2 = ui.stepper(surf, R(sx + half + 12 * u, sy + 4 * u, half, 38 * u), T('봇', 'Bots'), int(st['bots']), 0, 11) if ses.is_host else 0
-        if not ses.is_host:
-            ui.text(surf, T('바퀴 %d · 봇 %d' % (st['laps'], st['bots']), 'Laps %d · Bots %d' % (st['laps'], st['bots'])), sx, sy + 8 * u, 22 * u, (230, 235, 255))
+        im = bool(st.get('items'))
+        if ses.is_host:
+            if ui.button(surf, R(sx, sy + 50 * u, half, 38 * u), T('스피드전', 'Speed'), 'chip' if im else 'chipon', size=18 * u):
+                ses.send_settings(items=False)
+                self.profile['mode'] = 'speed'
+            if ui.button(surf, R(sx + half + 12 * u, sy + 50 * u, half, 38 * u), T('아이템전', 'Items'), 'chipon' if im else 'chip', size=18 * u):
+                ses.send_settings(items=True)
+                self.profile['mode'] = 'item'
+        else:
+            mode = T('아이템전', 'Item battle') if im else T('스피드전', 'Speed race')
+            ui.text(surf, T('바퀴 %d · 봇 %d · %s' % (st['laps'], st['bots'], mode), 'Laps %d · Bots %d · %s' % (st['laps'], st['bots'], mode)), sx, sy + 8 * u, 22 * u, (230, 235, 255))
         if d1:
             ses.send_settings(laps=int(st['laps']) + d1)
         if d2:
             ses.send_settings(bots=int(st['bots']) + d2)
         if ses.is_host:
-            if ui.button(surf, R(sx, sy + 56 * u, sw_, 64 * u), T('레이스 시작!', 'START RACE!'), 'primary', size=30 * u):
+            if ui.button(surf, R(sx, sy + 100 * u, sw_, 64 * u), T('레이스 시작!', 'START RACE!'), 'primary', size=30 * u):
                 ses.start_race()
         else:
-            ui.text(surf, T('방장이 시작하기를 기다리는 중…', 'Waiting for the host to start…'), sx + sw_ / 2, sy + 70 * u, 22 * u, (190, 205, 240), 'c')
+            ui.text(surf, T('방장이 시작하기를 기다리는 중…', 'Waiting for the host to start…'), sx + sw_ / 2, sy + 100 * u, 22 * u, (190, 205, 240), 'c')
 
     # ------------------------------------------------------------------ 메인 루프
     def step(self, dt):

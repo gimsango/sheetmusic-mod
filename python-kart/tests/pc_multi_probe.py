@@ -30,7 +30,7 @@ try:
     g.session.start_race()
     for _ in range(40): frames(1); S2.pump(); time.sleep(0.01)
     assert g.scene == 'race', g.scene
-    R2 = K.Race(8, 2, S2.entries_from_start(S2.start_msg), multi=True, is_host=S2.is_host, countdown=0.0, net=S2.net, auto_local=True)
+    R2 = K.Race(8, 2, S2.entries_from_start(S2.start_msg), multi=True, is_host=S2.is_host, countdown=0.0, net=S2.net, auto_local=True, items=bool(S2.start_msg.get('items')))
     race = g.race; race.auto_local = True; race.start_at = time.monotonic() - 1
     for f in range(60 * 12):
         for m in S2.pump(): R2.handle_message(m)

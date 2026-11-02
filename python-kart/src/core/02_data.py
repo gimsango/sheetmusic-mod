@@ -169,4 +169,4 @@ def kart_stats(kid):
     handling = c(b['han'] + w['han'] - (size - 2) * 0.2 + (0.4 if rim == 2 else 0))
     drift = c(b['dft'] + (0.8 if rim == 4 else 0) + (0.4 if size >= 3 else 0) - (0.2 if rim == 1 else 0))
     return dict(speed=speed, accel=accel, handling=handling, drift=drift,
-                max_speed=52 + speed * 3.0, accel_rate=15 + accel * 1.7, turn_rate=1.5 + handling * 0.11, drift_grip=4.2 - drift * 0.18)
+                max_speed=52 + speed * 3.0, accel_rate=15 + accel * 1.7, turn_rate=1.62 + handling * 0.12, drift_grip=4.2 - drift * 0.18)

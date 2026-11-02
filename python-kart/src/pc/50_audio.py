@@ -64,6 +64,9 @@ class Audio(object):
                 'bump': synth(110, 170, 0.5, 'sine', 0.45), 'tier': synth(1500, 70, 0.2, 'tri'), 'lap': synth(740, 260, 0.28, 'tri', 1.34),
                 'finish': synth(520, 700, 0.3, 'tri', 2.0), 'click': synth(900, 40, 0.2, 'tri'),
                 'engine': synth_engine(), 'driftl': synth_noise(500, 0.16, False, True),
+                'iroll': synth(1300, 30, 0.12, 'square'), 'iget': synth(880, 150, 0.26, 'tri', 1.5), 'iuse': synth_noise(220, 0.3, True),
+                'ihit': synth(190, 280, 0.45, 'square', 0.4), 'iboom': synth_noise(650, 0.55), 'izap': synth(1500, 320, 0.25, 'square', 0.25),
+                'iblock': synth(1250, 170, 0.26, 'tri', 1.2),
             }
             for name, buf in defs.items():
                 path = os.path.join(d, name + '.wav')

@@ -93,6 +93,16 @@ class HUD(object):
         self.toast_until = 0.0
         self.center_until = 0.0
         self.visible = True
+        self._txt = {}
+
+    def _set(self, node, text):
+        """글자가 바뀔 때만 setText (매 프레임 글자 메시를 다시 만들면 느려짐)"""
+        if self._txt.get(id(node)) != text:
+            self._txt[id(node)] = text
+            node.setText(text)
+
+    def set_item_mode(self, on):
+        self.toast.setPos(0, 0.5 if on else 0.62)
 
     def build_minimap(self, track):
         if self.mini_np is not None:
@@ -145,13 +155,14 @@ class HUD(object):
         loc = race.local
         sim = loc.sim
         rank = race.ranking()
-        self.pos.setText(str(rank.index(loc) + 1))
-        w = 0.1 * len(str(rank.index(loc) + 1))
-        self.tot.setPos(0.28 + 0.12 * (len(str(rank.index(loc) + 1)) - 1), -0.2)
-        self.tot.setText('/%d' % len(race.racers))
-        self.lap.setText('LAP %d/%d' % (min(race.laps, sim.lap), race.laps))
-        self.time.setText(fmt_time(max(0.0, race.t)))
-        self.spd.setText(str(int(sim.speed * 3.6)))
+        ps = str(rank.index(loc) + 1)
+        if self._txt.get(id(self.pos)) != ps:
+            self.tot.setPos(0.28 + 0.12 * (len(ps) - 1), -0.2)
+        self._set(self.pos, ps)
+        self._set(self.tot, '/%d' % len(race.racers))
+        self._set(self.lap, 'LAP %d/%d' % (min(race.laps, sim.lap), race.laps))
+        self._set(self.time, fmt_time(max(0.0, race.t)))
+        self._set(self.spd, str(int(sim.speed * 3.6)))
         self.boost.set(sim.speed / sim.stats['max_speed'], (1.0, 0.63, 0.16, 1) if sim.boost_t > 0 else (0.1, 0.9, 1.0, 1))
         if sim.drifting:
             col = [(0.67, 0.8, 1, 1), (0.23, 0.67, 1, 1), (1, 0.63, 0.16, 1), (0.82, 0.31, 1, 1)][sim.drift_tier]
@@ -162,19 +173,23 @@ class HUD(object):
         for i, t in enumerate(self.board):
             if i < len(rank):
                 r = rank[i]
-                t.setText('%d  %s' % (i + 1, r.name))
-                t.setFg((1, 0.72, 0.15, 1) if r is loc else (1, 1, 1, 1))
+                me = r is loc
+                key = ('%d  %s' % (i + 1, r.name)) + ('\x01' if me else '')
+                if self._txt.get(id(t)) != key:
+                    self._txt[id(t)] = key
+                    t.setText('%d  %s' % (i + 1, r.name))
+                    t.setFg((1, 0.72, 0.15, 1) if me else (1, 1, 1, 1))
             else:
-                t.setText('')
+                self._set(t, '')
         # 카운트다운 / 알림
         if race.phase == 'count':
             n = int(math.ceil(max(0.0, race.count_left)))
-            self.center.setText(str(n) if 1 <= n <= 3 else '')
+            self._set(self.center, str(n) if 1 <= n <= 3 else '')
         elif now > self.center_until:
-            self.center.setText('')
+            self._set(self.center, '')
         if now > self.toast_until:
-            self.toast.setText('')
-        self.wrong.setText(T('역주행!', 'WRONG WAY!') if (sim.wrong_way and race.phase == 'run' and not loc.finished) else '')
+            self._set(self.toast, '')
+        self._set(self.wrong, T('역주행!', 'WRONG WAY!') if (sim.wrong_way and race.phase == 'run' and not loc.finished) else '')
         # 미니맵
         if self.mini_np is not None:
             for i, d in enumerate(self.dots):
@@ -190,11 +205,13 @@ class HUD(object):
 
     def say(self, text, secs=1.2, big=False, color=(1, 0.8, 0.27, 1)):
         if big:
-            self.center.setText(text)
+            self._set(self.center, text)
             self.center_until = time.time() + secs
         else:
-            self.toast.setText(text)
+            self._set(self.toast, text)
             self.toast.setFg(color)
+            n = len(text)
+            self.toast.setScale(0.1 if n <= 40 else max(0.05, 0.1 * 40.0 / n))      # 긴 문장은 글자를 줄여서 화면 안에
             self.toast_until = time.time() + secs
 
     def destroy(self):

@@ -75,6 +75,7 @@ class RoomServer(object):
         self.map = 1
         self.laps = 3
         self.bots = 0
+        self.items = True             # 아이템전 여부
         self.state = 'lobby'
         self.next_id = 1
         self.running = False
@@ -178,7 +179,7 @@ class RoomServer(object):
 
     def _room_msg(self):
         with self.lock:
-            return {'t': 'room', 'host': self.host_id, 'map': self.map, 'laps': self.laps, 'bots': self.bots, 'state': self.state,
+            return {'t': 'room', 'host': self.host_id, 'map': self.map, 'laps': self.laps, 'bots': self.bots, 'items': self.items, 'state': self.state,
                     'players': [{'id': c.id, 'name': c.name, 'kart': c.kart} for c in self.conns.values()]}
 
     def _broadcast(self, obj, exclude=None):
@@ -226,7 +227,7 @@ class RoomServer(object):
             return
         if c.id is None:
             return
-        if t in ('s', 'b', 'fin'):
+        if t in ('s', 'b', 'fin') or (isinstance(t, str) and t[:1] == 'i'):     # 'i*' = 아이템전 메시지
             m['id'] = c.id
             self._broadcast(m, exclude=c.id)
         elif t == 'profile':
@@ -241,6 +242,8 @@ class RoomServer(object):
                     self.laps = int(clamp(int(m['laps']), 1, 10))
                 if 'bots' in m:
                     self.bots = int(clamp(int(m['bots']), 0, self.MAX_PLAYERS - 1))
+                if 'items' in m:
+                    self.items = bool(m['items'])
                 self._broadcast(self._room_msg())
         elif t == 'start':
             if self.host_id == c.id and self.state == 'lobby':
@@ -254,7 +257,7 @@ class RoomServer(object):
                     bots = []
                     for i in range(min(self.bots, self.MAX_PLAYERS - len(order))):
                         bots.append({'id': 'b%d' % (i + 1), 'name': 'BOT %d' % (i + 1), 'kart': random.randrange(KART_COUNT), 'slot': len(order) + i})
-                    msg = {'t': 'start', 'map': self.map, 'laps': self.laps, 'countdown': 5.0, 'players': order, 'bots': bots}
+                    msg = {'t': 'start', 'map': self.map, 'laps': self.laps, 'countdown': 5.0, 'players': order, 'bots': bots, 'items': self.items}
                 self._broadcast(msg)
         elif t == 'lobby':
             if self.host_id == c.id:
@@ -424,7 +427,7 @@ class Session(object):
         self.my_id = None
         self.host_id = None
         self.players = []
-        self.settings = {'map': 1, 'laps': 3, 'bots': 0}
+        self.settings = {'map': 1, 'laps': 3, 'bots': 0, 'items': True}
         self.start_msg = None
         self.address = ''
         self._joined = False
@@ -439,6 +442,7 @@ class Session(object):
             self.server = RoomServer(port, name=self.profile.display_name()).start()
             self.server.map = int(self.profile['map'])
             self.server.laps = int(self.profile['laps'])
+            self.server.items = self.profile['mode'] == 'item'
         except Exception as e:
             self.server = None
             self.error = 'server: %s' % e
@@ -479,7 +483,7 @@ class Session(object):
             elif t == 'room':
                 self.host_id = m.get('host')
                 self.players = m.get('players', [])
-                self.settings = {'map': m.get('map', 1), 'laps': m.get('laps', 3), 'bots': m.get('bots', 0)}
+                self.settings = {'map': m.get('map', 1), 'laps': m.get('laps', 3), 'bots': m.get('bots', 0), 'items': bool(m.get('items', False))}
                 if self.state in ('connecting', 'idle'):
                     self.state = 'lobby'
             elif t == 'start':

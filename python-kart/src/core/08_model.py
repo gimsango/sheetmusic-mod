@@ -118,7 +118,7 @@ class ChaseCam(object):
         if self.h is None:
             self.h = rc.h
             self.y = rc.y
-        self.h += wrap_pi(target - self.h) * (1 - math.exp(-5.5 * dt))
+        self.h += wrap_pi(target - self.h) * (1 - math.exp(-7.0 * dt))
         self.y += (rc.y - self.y) * (1 - math.exp(-9.0 * dt))
         dist = 8.3 + sr * 2.2 + (1.6 if rc.boosting else 0.0)
         hgt = 3.5 + sr * 0.4

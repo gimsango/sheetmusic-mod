@@ -40,6 +40,10 @@ class Renderer(object):
         self.labels = []
         self.shake = 0.0
         self.cam = Cam()
+        self.frame_no = 0
+        self.anim_t = 0.0
+        self.qfont_path = None
+        self.qcache = {}
         self.set_quality(quality, sw, sh)
 
     # ---- 해상도/품질 -------------------------------------------------------------------
@@ -321,6 +325,24 @@ class Renderer(object):
             sl_i = slot_map.get(o)
             if sl_i is not None:
                 items[sl_i].append((self._dp_of(tr.px[ai], tr.py[ai], tr.pz[ai]), 5, ai))
+        isys = getattr(race, 'items', None)
+        if isys is not None:
+            for b in isys.boxes:
+                if b['t'] > 0.0:
+                    continue
+                o = ((b['idx'] - focus_idx) * dirn + half) % N - half
+                sl_i = slot_map.get(o)
+                if sl_i is not None:
+                    dpb = self._dp_of(b['x'], b['y'], b['z'])
+                    if dpb > 1.5:
+                        items[sl_i].append((dpb, 6, b))
+            for e in isys.ents:
+                o = ((e.hint - focus_idx) * dirn + half) % N - half
+                sl_i = slot_map.get(o)
+                if sl_i is not None:
+                    dpe = self._dp_of(e.x, e.y, e.z)
+                    if dpe > 1.2:
+                        items[sl_i].append((dpe + (0.0 if e.kind != 'trap' else 0.3), 7, e))
 
         poly = self.poly
         prev = None
@@ -390,8 +412,12 @@ class Renderer(object):
                             self._draw_lamp(it[2], lv)
                         elif code == 4:
                             self._draw_gate()
-                        else:
+                        elif code == 5:
                             self._draw_arch(it[2])
+                        elif code == 6:
+                            self._draw_ibox(it[2], it[0])
+                        else:
+                            self._draw_ent(it[2], it[0])
             prev = pts
             prev_i = i
 
@@ -511,24 +537,25 @@ class Renderer(object):
         self.draw_boxes(org, Rv, up, T, self.gate_boxes, 1.0)
 
     # ---- 카트 -----------------------------------------------------------------------------------------
-    def draw_boxes(self, org, Rv, Uv, Fv, boxes, shade, lod_fog=0):
-        """박스 목록을 (org, R/U/F 기저)에서 3D 로 그린다. 각 박스: 보이는 면만 칠함."""
+    def draw_boxes(self, org, Rv, Uv, Fv, boxes, shade, lod_fog=0, scale=1.0, tint=None):
+        """박스 목록을 (org, R/U/F 기저)에서 3D 로 그린다. 각 박스: 보이는 면만 칠함. scale = 크기 배율, tint = (색, 섞는 양)"""
         c = self.cam
         f, hx, hy, near = self.f, self.hx, self.hy, self.near
         csy, ccy, csp, ccp = c.sy, c.cy, c.sp, c.cp
         ox, oy, oz = org[0] - c.x, org[1] - c.y, org[2] - c.z
         # 월드 벡터 -> 카메라 좌표 (x, y, depth)
 
-        def cam_vec(v):
+        def cam_vec(v, k=1.0):
             xr = -v[0] * ccy + v[2] * csy
             zr = v[0] * csy + v[2] * ccy
-            return (xr, v[1] * ccp + zr * csp, zr * ccp - v[1] * csp)
+            return (xr * k, (v[1] * ccp + zr * csp) * k, (zr * ccp - v[1] * csp) * k)
         O = cam_vec((ox, oy, oz))
-        Rc, Uc, Fc = cam_vec(Rv), cam_vec(Uv), cam_vec(Fv)
-        # 카메라의 로컬 좌표
-        clx = -(ox * Rv[0] + oy * Rv[1] + oz * Rv[2])
-        cly = -(ox * Uv[0] + oy * Uv[1] + oz * Uv[2])
-        clz = -(ox * Fv[0] + oy * Fv[1] + oz * Fv[2])
+        Rc, Uc, Fc = cam_vec(Rv, scale), cam_vec(Uv, scale), cam_vec(Fv, scale)
+        # 카메라의 로컬 좌표 (모델 단위)
+        inv = 1.0 / scale
+        clx = -(ox * Rv[0] + oy * Rv[1] + oz * Rv[2]) * inv
+        cly = -(ox * Uv[0] + oy * Uv[1] + oz * Uv[2]) * inv
+        clz = -(ox * Fv[0] + oy * Fv[1] + oz * Fv[2]) * inv
         order = []
         for bx in boxes:
             dcen = O[2] + Rc[2] * bx[0] + Uc[2] * bx[1] + Fc[2] * bx[2]
@@ -565,6 +592,8 @@ class Renderer(object):
                 if not vis[name]:
                     continue
                 cc = col if glow else shade_rgb(col, k * shade)
+                if tint is not None:
+                    cc = mix_rgb(cc, tint[0], tint[1])
                 self.poly(cc, [corners[i] for i in ids])
 
     def _draw_kart(self, rc, dp, lv):
@@ -573,6 +602,8 @@ class Renderer(object):
         m = self.model(rc.kart_id)
         if dp < (1.0 if rc.kind == 'local' else 3.2):
             return
+        fxb = rc.fx
+        sc = rc.scale
         h = rc.h
         up = rc.up
         fx, fz = math.sin(h), math.cos(h)
@@ -582,46 +613,59 @@ class Renderer(object):
         fl = math.sqrt(Fv[0] ** 2 + Fv[1] ** 2 + Fv[2] ** 2) or 1.0
         Fv = (Fv[0] / fl, Fv[1] / fl, Fv[2] / fl)
         Rv = (Fv[1] * up[2] - Fv[2] * up[1], Fv[2] * up[0] - Fv[0] * up[2], Fv[0] * up[1] - Fv[1] * up[0])   # F x U
-        org = (rc.x, rc.y, rc.z)
+        gnd = (rc.x, rc.y, rc.z)
+        org = (rc.x, rc.y + rc.air_y, rc.z)
         amb = 0.7 if tg.night else 1.0
-        # 드리프트: 차체를 진행 방향에서 약간 틀어 보이게 (차체만 회전)
-        yaw_off = 0.0
+        tint = None
+        if fxb & FX_STAR:
+            tint = (hue_rgb(self.anim_t * 2.2), 0.5)
+        elif fxb & FX_FREEZE:
+            tint = ((175, 225, 255), 0.6)
+        elif fxb & FX_SHRINK and fxb & FX_SPIN:
+            tint = ((255, 255, 160), 0.35)
+        # 드리프트/스핀: 차체를 진행 방향에서 틀어 보이게 (차체만 회전)
+        yaw_off = rc.spin_ang
         if rc.drifting:
-            yaw_off = -rc.drift_dir * 0.3
+            yaw_off += -rc.drift_dir * 0.3
         elif abs(rc.slip) > 1.0:
-            yaw_off = clamp(-rc.slip * 0.02, -0.25, 0.25)
+            yaw_off += clamp(-rc.slip * 0.02, -0.25, 0.25)
         if yaw_off:
             cs, sn = math.cos(yaw_off), math.sin(yaw_off)
             Fn = tuple(Fv[i] * cs + Rv[i] * sn for i in range(3))
             Rn = tuple(Rv[i] * cs - Fv[i] * sn for i in range(3))
             Fv, Rv = Fn, Rn
-        # 그림자
+        # 그림자 (공중이면 작아짐)
         if dp < qp['lod1']:
-            L, W = m.L, m.W
+            L, W = m.L * sc, m.W * sc
+            ks = 1.0 / (1.0 + rc.air_y * 0.25)
             pts = []
             for a in range(8):
                 t = a * TAU / 8
-                lx, lz = math.cos(t) * W * 0.66, math.sin(t) * L * 0.62
-                pts.append(self.proj(org[0] + Rv[0] * lx + Fv[0] * lz, org[1] + 0.05 + Rv[1] * lx + Fv[1] * lz, org[2] + Rv[2] * lx + Fv[2] * lz))
+                lx, lz = math.cos(t) * W * 0.66 * ks, math.sin(t) * L * 0.62 * ks
+                pts.append(self.proj(gnd[0] + Rv[0] * lx + Fv[0] * lz, gnd[1] + 0.05 + Rv[1] * lx + Fv[1] * lz, gnd[2] + Rv[2] * lx + Fv[2] * lz))
             base_col = tg.pal['grass_a' if rc.offroad else 'road_a'][lv]
             self.poly(shade_rgb(base_col, 0.5), pts)
+        if (fxb & FX_GHOST) and (self.frame_no // 3) % 2 == 0:
+            return                                    # 유령: 깜빡임
         if dp > qp['lod1'] * 1.9:
             # 아주 먼 카트: 색 점
             p = self.proj(org[0], org[1] + 0.7, org[2])
             if p[2] > self.near:
-                r = max(1, int(self.f * 1.0 / p[2]))
-                pygame.draw.rect(self.surf, m.main, (int(p[0] - r), int(p[1] - r), r * 2 + 1, r + 1))
+                r = max(1, int(self.f * 1.0 * sc / p[2]))
+                pygame.draw.rect(self.surf, m.main if tint is None else tint[0], (int(p[0] - r), int(p[1] - r), r * 2 + 1, r + 1))
             return
         lod0 = dp < qp['lod0']
         # 부스트 불꽃
         if rc.boosting and dp < qp['lod1']:
-            L = m.L
-            ah = m.base + m.H * 0.3
+            L = m.L * sc
+            ah = (m.base + m.H * 0.3) * sc
             anc = (org[0] - Fv[0] * (L / 2) + up[0] * ah, org[1] - Fv[1] * (L / 2) + up[1] * ah, org[2] - Fv[2] * (L / 2) + up[2] * ah)
+            big = 1.6 if fxb & FX_AUTO else 1.0
             for ln, col in ((1.9, (255, 140, 30)), (1.1, (255, 230, 120))):
-                ln = ln * (0.8 + 0.4 * random_f())
-                pa = self.proj(anc[0] + Rv[0] * 0.2, anc[1] + Rv[1] * 0.2, anc[2] + Rv[2] * 0.2)
-                pb = self.proj(anc[0] - Rv[0] * 0.2, anc[1] - Rv[1] * 0.2, anc[2] - Rv[2] * 0.2)
+                ln = ln * (0.8 + 0.4 * random_f()) * sc * big
+                w2 = 0.2 * sc * big
+                pa = self.proj(anc[0] + Rv[0] * w2, anc[1] + Rv[1] * w2, anc[2] + Rv[2] * w2)
+                pb = self.proj(anc[0] - Rv[0] * w2, anc[1] - Rv[1] * w2, anc[2] - Rv[2] * w2)
                 pt = self.proj(anc[0] - Fv[0] * ln, anc[1] - Fv[1] * ln, anc[2] - Fv[2] * ln)
                 self.poly(col, (pa, pb, pt))
         boxes = m.boxes if lod0 else m.boxes_lod1
@@ -632,31 +676,43 @@ class Renderer(object):
         wheels_front = [w for w in m.wheels if w[2] > 0]
         first, second = (wheels_front, wheels_back) if cl < 0 else (wheels_back, wheels_front)
         for w in first:
-            self._draw_wheel(m, w, org, Rv, up, Fv, rc, lod0, amb)
-        self.draw_boxes(org, Rv, up, Fv, boxes, amb)
+            self._draw_wheel(m, w, org, Rv, up, Fv, rc, lod0, amb, sc)
+        self.draw_boxes(org, Rv, up, Fv, boxes, amb, 0, sc, tint)
         # 드라이버 헬멧
         hp = m.helmet
-        hxw = org[0] + Rv[0] * hp[0] + up[0] * hp[1] + Fv[0] * hp[2]
-        hyw = org[1] + Rv[1] * hp[0] + up[1] * hp[1] + Fv[1] * hp[2]
-        hzw = org[2] + Rv[2] * hp[0] + up[2] * hp[1] + Fv[2] * hp[2]
+        hxw = org[0] + (Rv[0] * hp[0] + up[0] * hp[1] + Fv[0] * hp[2]) * sc
+        hyw = org[1] + (Rv[1] * hp[0] + up[1] * hp[1] + Fv[1] * hp[2]) * sc
+        hzw = org[2] + (Rv[2] * hp[0] + up[2] * hp[1] + Fv[2] * hp[2]) * sc
         hp_ = self.proj(hxw, hyw, hzw)
         if hp_[2] > self.near:
-            r = max(2, int(self.f * 0.28 / hp_[2]))
-            pygame.draw.circle(self.surf, shade_rgb(m.main, amb * 0.8), (int(hp_[0]), int(hp_[1])), r)
-            pygame.draw.circle(self.surf, shade_rgb(m.main, amb * 1.3), (int(hp_[0] - r * 0.3), int(hp_[1] - r * 0.3)), max(1, r // 2))
+            hcol = m.main if tint is None else mix_rgb(m.main, tint[0], tint[1])
+            r = max(2, int(self.f * 0.28 * sc / hp_[2]))
+            pygame.draw.circle(self.surf, shade_rgb(hcol, amb * 0.8), (int(hp_[0]), int(hp_[1])), r)
+            pygame.draw.circle(self.surf, shade_rgb(hcol, amb * 1.3), (int(hp_[0] - r * 0.3), int(hp_[1] - r * 0.3)), max(1, r // 2))
             if cl > 0 and lod0:
                 pygame.draw.rect(self.surf, (12, 12, 14), (int(hp_[0] - r * 0.7), int(hp_[1] - r * 0.15), max(2, int(r * 1.4)), max(1, int(r * 0.45))))
         for w in second:
-            self._draw_wheel(m, w, org, Rv, up, Fv, rc, lod0, amb)
+            self._draw_wheel(m, w, org, Rv, up, Fv, rc, lod0, amb, sc)
+        # 방패: 카트를 감싸는 비눗방울
+        if fxb & FX_SHIELD:
+            ch = (m.base + m.H * 0.6) * sc
+            cp_ = self.proj(org[0] + up[0] * ch, org[1] + up[1] * ch, org[2] + up[2] * ch)
+            if cp_[2] > self.near:
+                r = int(self.f * max(m.L, m.W * 1.4) * 0.72 * sc / cp_[2])
+                if 3 < r < 900:
+                    pygame.draw.circle(self.surf, (120, 220, 255), (int(cp_[0]), int(cp_[1])), r, max(1, r // 14))
+                    pygame.draw.circle(self.surf, (235, 250, 255), (int(cp_[0] - r * 0.35), int(cp_[1] - r * 0.4)), max(1, r // 7))
         # 이름표
         if rc.kind != 'local' and 14 < dp < 150:
-            p = self.proj(org[0] + up[0] * 2.4, org[1] + up[1] * 2.4, org[2] + up[2] * 2.4)
+            k2 = 2.4 * sc
+            p = self.proj(org[0] + up[0] * k2, org[1] + up[1] * k2, org[2] + up[2] * k2)
             if p[2] > self.near:
                 self.labels.append((p[0], p[1], rc.name, (255, 210, 120) if rc.kind == 'bot' else (150, 232, 255), dp))
 
-    def _draw_wheel(self, m, w, org, Rv, Uv, Fv, rc, lod0, amb):
+    def _draw_wheel(self, m, w, org, Rv, Uv, Fv, rc, lod0, amb, sc=1.0):
         lx, ly, lz, sgn, front = w
-        R, ww = m.wheel_r, m.wheel_w
+        lx, ly, lz = lx * sc, ly * sc, lz * sc
+        R, ww = m.wheel_r * sc, m.wheel_w * sc
         if not lod0:
             self.draw_boxes(org, Rv, Uv, Fv, [(lx, ly, lz, ww / 2, R, R, (26, 26, 30), 1, 1, False)], amb)
             return
@@ -715,9 +771,210 @@ class Renderer(object):
     def _wheel_phase(self, rc):
         return (rc.total * self.track.ds / 0.4) % TAU if self.track is not None else 0.0
 
+    # ---- 아이템전: 상자 / 투사체 / 함정 ------------------------------------------------------------------
+    def set_qmark_font(self, path):
+        self.qfont_path = path
+        self.qcache = {}
+
+    def _qmark(self, px):
+        px = int(clamp(px, 6, 150))
+        px -= px % 2
+        if px in self.qcache:
+            return self.qcache[px]
+        try:
+            g = pygame.font.Font(self.qfont_path, px).render('?', True, (255, 255, 255))
+        except Exception:
+            g = None
+        if len(self.qcache) > 60:
+            self.qcache.clear()
+        self.qcache[px] = g
+        return g
+
+    @staticmethod
+    def _yaw_basis(ang):
+        c, s_ = math.cos(ang), math.sin(ang)
+        return (-c, 0.0, s_), (0.0, 1.0, 0.0), (s_, 0.0, c)
+
+    def _cube_box(self, x, y, z, ang, half, col, dp, qmark=True):
+        Rv, Uv, Fv = self._yaw_basis(ang)
+        self.draw_boxes((x, y, z), Rv, Uv, Fv, [(0, 0, 0, half, half, half, col, 1, 1, False)], 1.0)
+        if qmark and dp < 80:
+            p = self.proj(x, y, z)
+            if p[2] > self.near:
+                q = self._qmark(self.f * half * 1.7 / p[2])
+                if q is not None:
+                    self.surf.blit(q, (int(p[0] - q.get_width() / 2), int(p[1] - q.get_height() / 2)))
+
+    def _draw_ibox(self, b, dp):
+        t = self.anim_t
+        bob = math.sin(t * 3.0 + b['ph']) * 0.18
+        self._cube_box(b['x'], b['y'] + bob, b['z'], b['ph'] + t * 1.8, 0.8, hue_rgb(t * 0.25 + b['ph'] / TAU), dp)
+
+    def _ground_poly(self, cx, cy, cz, pts, col, rot=0.0):
+        """지면 위 평면 다각형. pts = (옆, 앞) 로컬 좌표"""
+        c, s_ = math.cos(rot), math.sin(rot)
+        self.poly(col, [self.proj(cx - lx * c + lz * s_, cy, cz + lx * s_ + lz * c) for (lx, lz) in pts])
+
+    def _ground_ring(self, cx, cy, cz, r, col, n=18, width=2):
+        pts = []
+        for i in range(n):
+            a = TAU * i / n
+            p = self.proj(cx + math.cos(a) * r, cy, cz + math.sin(a) * r)
+            if p[2] <= self.near:
+                return
+            pts.append((p[0], p[1]))
+        pygame.draw.lines(self.surf, col, True, pts, width)
+
+    def _ball(self, x, y, z, r, col, hl=None):
+        p = self.proj(x, y, z)
+        if p[2] <= self.near:
+            return None
+        rp = int(self.f * r / p[2])
+        if rp > 700 or not (-rp <= p[0] <= self.rw + rp and -rp <= p[1] <= self.rh + rp):
+            return p
+        pygame.draw.circle(self.surf, col, (int(p[0]), int(p[1])), max(1, rp))
+        if hl is not None and rp >= 3:
+            pygame.draw.circle(self.surf, hl, (int(p[0] - rp * 0.35), int(p[1] - rp * 0.35)), max(1, rp // 3))
+        return p
+
+    _BLOB = (1.0, 0.85, 1.05, 0.9, 1.12, 0.8, 1.0, 0.92, 1.08, 0.86, 1.02, 0.9)
+
+    def _ent_boxes(self, it):
+        key = ('eb', it['id'])
+        bx = self.models.get(key)
+        if bx is None:
+            bx = self.models[key] = ent_boxes(it)
+        return bx
+
+    def _draw_ent(self, e, dp):
+        it = ITEMS[e.item]
+        c1, c2 = it['c1'], it['c2']
+        icon = it['icon']
+        k = e.kind
+        t = self.anim_t
+        if k == 'trap':
+            self._draw_trap(e, it, dp)
+            return
+        if k == 'tornado':
+            for i in range(5):
+                w = 1.0 + i * 0.75
+                p = self.proj(e.x + math.sin(t * 9 + i) * 0.35 * i, e.y + 0.3 + i * 1.15, e.z + math.cos(t * 9 + i) * 0.35 * i)
+                if p[2] > self.near:
+                    rw = int(self.f * w / p[2])
+                    rh = max(1, int(rw * 0.32))
+                    if 1 < rw < 800:
+                        pygame.draw.ellipse(self.surf, c1 if i % 2 == 0 else c2, (int(p[0] - rw), int(p[1] - rh), rw * 2, rh * 2), max(1, rh // 2))
+            return
+        if k == 'meteor':
+            self._ground_ring(e.x, e.gy + 0.15, e.z, it['p'].get('r', 5.0), (255, 70, 40) if int(t * 8) % 2 else (255, 200, 60))
+            p0 = self.proj(e.x, e.y + 7.0, e.z)
+            p1 = self.proj(e.x, e.y, e.z)
+            if p0[2] > self.near and p1[2] > self.near:
+                pygame.draw.line(self.surf, (255, 190, 60), (p0[0], p0[1]), (p1[0], p1[1]), int(clamp(self.f * 0.9 / p1[2], 1, 40)))
+            self._ball(e.x, e.y, e.z, 1.6, c1, (255, 230, 120))
+            return
+        if k == 'seeker':
+            fx_, fz_ = math.sin(e.h), math.cos(e.h)
+            rx_, rz_ = -fz_, fx_
+            flap = math.sin(t * 22) * 0.45
+            for sg in (-1, 1):
+                a = self.proj(e.x + rx_ * sg * 0.6, e.y, e.z + rz_ * sg * 0.6)
+                b = self.proj(e.x + rx_ * sg * 2.3, e.y + 0.6 + flap, e.z + rz_ * sg * 2.3)
+                c = self.proj(e.x + rx_ * sg * 1.2 - fx_ * 0.9, e.y - 0.1, e.z + rz_ * sg * 1.2 - fz_ * 0.9)
+                self.poly(c2, (a, b, c))
+            self._ball(e.x, e.y, e.z, 1.0, c1, (255, 255, 255))
+            return
+        if k == 'bomb':
+            p = self._ball(e.x, e.y, e.z, 0.8, c1, (100, 100, 112))
+            if p is not None and p[2] > self.near:
+                blink = e.state == 1 and int(t * (6 + e.age * 12)) % 2 == 0
+                pygame.draw.circle(self.surf, (255, 50, 40) if blink else c2, (int(p[0]), int(p[1] - self.f * 0.85 / p[2])), max(1, int(self.f * 0.24 / p[2])))
+            return
+        if icon == 'laser':
+            p0 = self.proj(e.x, e.y, e.z)
+            sp = math.hypot(e.vx, e.vz) or 1.0
+            p1 = self.proj(e.x - e.vx / sp * 8.0, e.y, e.z - e.vz / sp * 8.0)
+            if p0[2] > self.near and p1[2] > self.near:
+                wpx = int(clamp(self.f * 0.35 / p0[2], 1, 16))
+                pygame.draw.line(self.surf, c1, (p0[0], p0[1]), (p1[0], p1[1]), wpx * 2)
+                pygame.draw.line(self.surf, (255, 255, 255), (p0[0], p0[1]), (p1[0], p1[1]), wpx)
+            return
+        if icon in ('missile', 'arrow', 'drone', 'bird', 'shuriken', 'boomerang'):
+            ang = (t * 20.0) if icon in ('shuriken', 'boomerang') else e.h
+            Rv, Uv, Fv = self._yaw_basis(ang)
+            self.draw_boxes((e.x, e.y, e.z), Rv, Uv, Fv, self._ent_boxes(it), 1.0)
+            return
+        if icon == 'bee':
+            for i in range(5):
+                a = t * 11 + i * 1.26
+                self._ball(e.x + math.cos(a) * 0.9, e.y + math.sin(a * 1.7) * 0.4, e.z + math.sin(a) * 0.9, 0.32, c1, c2)
+            return
+        p = self._ball(e.x, e.y, e.z, 0.75, c1, (255, 255, 255) if icon != 'ball' else c2)
+        if icon == 'target' and p is not None and p[2] > self.near:
+            rp = int(self.f * 0.75 / p[2])
+            if 3 < rp < 600:
+                pygame.draw.circle(self.surf, c2, (int(p[0]), int(p[1])), rp, max(1, rp // 5))
+
+    def _draw_trap(self, e, it, dp):
+        p = it['p']
+        shape = p.get('shape')
+        c1, c2 = it['c1'], it['c2']
+        y = e.gy + 0.08
+        t = self.anim_t
+        r = e.r
+        if shape == 'banana':
+            k = 1.9 if p.get('big') else 1.0
+            arc = [-1.3 + 2.6 * i / 6.0 for i in range(7)]
+            pts = [(math.sin(a) * 0.8 * k, (math.cos(a) * 0.8 - 0.45) * k) for a in arc] + \
+                  [(math.sin(a) * 0.45 * k, (math.cos(a) * 0.45 - 0.45) * k) for a in reversed(arc)]
+            self._ground_poly(e.x, y + 0.14, e.z, pts, c1, e.h)
+            self._ground_poly(e.x, y + 0.15, e.z, [(-0.1 * k, 0.32 * k), (0.1 * k, 0.32 * k), (0.06 * k, 0.48 * k), (-0.06 * k, 0.48 * k)], (110, 76, 30), e.h)
+        elif shape in ('oil', 'glue'):
+            n = len(self._BLOB)
+            pts = [(math.cos(TAU * i / n) * r * self._BLOB[i], math.sin(TAU * i / n) * r * self._BLOB[i]) for i in range(n)]
+            self._ground_poly(e.x, y, e.z, pts, (22, 20, 30) if shape == 'oil' else c1, e.h)
+            self._ground_poly(e.x, y + 0.01, e.z, [(math.cos(TAU * i / 8) * r * 0.22 + r * 0.3, math.sin(TAU * i / 8) * r * 0.14 - r * 0.25) for i in range(8)], c2, e.h)
+        elif shape == 'ice':
+            self._ground_poly(e.x, y, e.z, [(math.cos(TAU * i / 6) * r, math.sin(TAU * i / 6) * r) for i in range(6)], c1, e.h)
+            self._ground_poly(e.x, y + 0.01, e.z, [(math.cos(TAU * i / 6) * r * 0.55, math.sin(TAU * i / 6) * r * 0.55) for i in range(6)], c2, e.h)
+        elif shape == 'spikes':
+            self._ground_poly(e.x, y, e.z, [(-r, -0.4), (r, -0.4), (r, 0.4), (-r, 0.4)], c2, e.h)
+            if dp < 60:
+                ch, sh_ = math.cos(e.h), math.sin(e.h)
+                for i in range(6):
+                    lx = -r + (i + 0.5) * 2 * r / 6.0
+                    bx, bz = e.x - lx * ch, e.z + lx * sh_
+                    a = self.proj(bx - 0.18 * ch, y, bz + 0.18 * sh_)
+                    b = self.proj(bx + 0.18 * ch, y, bz - 0.18 * sh_)
+                    c = self.proj(bx, y + 0.45, bz)
+                    self.poly(c1, (a, b, c))
+        elif shape == 'mine':
+            self._ground_poly(e.x, y, e.z, [(math.cos(TAU * i / 10) * 0.85, math.sin(TAU * i / 10) * 0.85) for i in range(10)], c1)
+            self._ground_poly(e.x, y + 0.12, e.z, [(math.cos(TAU * i / 10) * 0.5, math.sin(TAU * i / 10) * 0.5) for i in range(10)], (110, 116, 130))
+            self._ball(e.x, y + 0.3, e.z, 0.17, (255, 40, 40) if int(t * 4) % 2 else (90, 20, 20))
+        elif shape == 'fakebox':
+            self._cube_box(e.x, e.gy + 0.85, e.z, -t * 1.8 + e.h, 0.8, hue_rgb(t * 0.25 + 0.5), dp)
+        elif shape == 'wall':
+            Rv, Uv, Fv = self._yaw_basis(e.h)
+            self.draw_boxes((e.x, e.gy, e.z), Rv, Uv, Fv, wall_boxes(it), 1.0)
+        elif shape == 'portal':
+            ch, sh_ = math.cos(e.h), math.sin(e.h)
+            pts = []
+            for i in range(16):
+                a = TAU * i / 16 + t * 2.0
+                q = self.proj(e.x - math.cos(a) * 1.3 * ch, e.gy + 1.4 + math.sin(a) * 1.3, e.z + math.cos(a) * 1.3 * sh_)
+                if q[2] <= self.near:
+                    return
+                pts.append((q[0], q[1]))
+            w = int(clamp(self.f * 0.28 / max(dp, 1.0), 1, 20))
+            pygame.draw.lines(self.surf, c1, True, pts, w)
+            pygame.draw.lines(self.surf, c2, True, pts[::2], max(1, w // 2))
+
     # ---- 프레임 ----------------------------------------------------------------------------------------
     def render(self, race, cam_pos, focus_idx, dirn, boost_fx=0.0, speed_ratio=0.0, t=0.0):
         self.labels = []
+        self.frame_no += 1
+        self.anim_t = t
         self.cam.set(*cam_pos)
         self.draw_background()
         self.draw_world(race, focus_idx, dirn)

@@ -6,6 +6,12 @@ def R(x, y, w, h):
     return pygame.Rect(int(x), int(y), int(w), int(h))
 
 
+ITEM_KEYS = {pygame.K_1: 0, pygame.K_2: 1, pygame.K_3: 2}
+for _n, _slot in (('K_KP1', 0), ('K_KP2', 1), ('K_KP3', 2), ('K_KP_1', 0), ('K_KP_2', 1), ('K_KP_3', 2)):
+    if hasattr(pygame, _n):
+        ITEM_KEYS[getattr(pygame, _n)] = _slot
+
+
 class ShowKart(object):
     """쇼룸(메뉴/차고 배경)에서 돌아가는 카트용 가짜 Racer + 가짜 Race"""
 
@@ -54,6 +60,12 @@ class App(object):
         self.sfx = Sfx(self.profile['sound'])
         self.session = Session(self.profile)
         self.renderer = Renderer(self.W, self.H, int(self.profile['quality']))
+        self.renderer.set_qmark_font(self.font_path)
+        self.icons = ItemIcons()
+        self.sfx_screen = ScreenFx()
+        self.hud_top = 0
+        self.brake_held = False
+        self.item_rects = []
         self.cam = ChaseCam()
         self.touch = TouchControls()
         self.touch.layout(self.W, self.H, self.profile['auto_gas'])
@@ -174,14 +186,16 @@ class App(object):
                         self.close_kb(r)
                     continue
                 self.keys.add(e.key)
-                if e.key in (pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_w, pygame.K_a, pygame.K_s, pygame.K_d, pygame.K_SPACE):
+                if e.key in (pygame.K_UP, pygame.K_DOWN, pygame.K_LEFT, pygame.K_RIGHT, pygame.K_w, pygame.K_a, pygame.K_s, pygame.K_d, pygame.K_SPACE) or e.key in ITEM_KEYS:
                     self.used_keyboard = True
                 if e.key in (pygame.K_UP, pygame.K_w):
                     self.used_gas_key = True          # 가속 키를 눌러 본 뒤부터 '직접 가속' (조향 키만으로는 바뀌지 않음)
                 if e.key in (pygame.K_ESCAPE, getattr(pygame, 'K_AC_BACK', -999)):
                     self.on_back()
                 elif self.scene == 'race':
-                    if e.key == pygame.K_r and self.race:
+                    if e.key in ITEM_KEYS:
+                        self.use_item(ITEM_KEYS[e.key])
+                    elif e.key == pygame.K_r and self.race:
                         self.race.respawn_local()
                     elif e.key == pygame.K_m:
                         self.sfx.enabled = not self.sfx.enabled
@@ -236,6 +250,7 @@ class App(object):
         gas = pygame.K_UP in k or pygame.K_w in k or 'gas' in pressed
         auto = self.profile['auto_gas'] and not self.used_gas_key
         drift = pygame.K_SPACE in k or pygame.K_LSHIFT in k or pygame.K_RSHIFT in k or 'drift' in pressed
+        self.brake_held = brake
         self.steer = steer_step(self.steer, tgt, dt, self.profile['steer_resp'])
         return {'steer': self.steer, 'throttle': 1.0 if (gas or (auto and not brake)) else 0.0, 'brake': 1.0 if brake else 0.0, 'drift': drift}, pressed
 
@@ -243,11 +258,16 @@ class App(object):
     def start_solo(self):
         p = self.profile
         entries = solo_entries(p.display_name(), p['kart'], int(p['bots']))
-        self.start_race(int(p['map']), int(p['laps']), entries, False, True, 5.0)
+        self.start_race(int(p['map']), int(p['laps']), entries, False, True, 5.0, p['mode'] == 'item')
 
-    def start_race(self, map_id, laps, entries, multi, is_host, countdown):
+    def use_item(self, slot):
+        if self.race is not None and self.race.items is not None and not (self.paused and not self.race.multi):
+            self.race.use_item(slot, self.brake_held)
+
+    def start_race(self, map_id, laps, entries, multi, is_host, countdown, items=False):
         self.loading(T('맵 생성 중…', 'Building map…') + ' #%d' % map_id)
-        self.race = Race(map_id, laps, entries, multi=multi, is_host=is_host, countdown=countdown, net=self.session.net if multi else None)
+        self.race = Race(map_id, laps, entries, multi=multi, is_host=is_host, countdown=countdown, net=self.session.net if multi else None, items=items)
+        self.hud_top = 0
         self.renderer.set_track(self.race.track)
         self.show_map = None
         self.cam.reset()
@@ -261,7 +281,13 @@ class App(object):
         self.dirn = 1
         self.scene = 'race'
         if not self.touch_visible() or not (_is_android() or self.ptr.has_touch):
-            self.toast(T('← → 조향   ↑ 가속   Space 드리프트   R 복귀', 'Left/Right steer   Up gas   Space drift   R reset'), 6.0, (255, 255, 255))
+            if items:
+                self.toast(T('← → 조향  ↑ 가속  Space 드리프트  1·2·3 아이템 (↓ 누른 채 = 뒤로)  R 복귀',
+                             'Steer ←→  Gas ↑  Drift Space  Items 1·2·3 (hold ↓ = throw back)  R reset'), 6.0, (255, 255, 255))
+            else:
+                self.toast(T('← → 조향   ↑ 가속   Space 드리프트   R 복귀', 'Left/Right steer   Up gas   Space drift   R reset'), 6.0, (255, 255, 255))
+        elif items:
+            self.toast(T('위쪽 아이템 칸을 눌러서 사용!', 'Tap the item slots at the top!'), 5.0, (255, 255, 255))
 
     def toggle_pause(self):
         if self.race is None:
@@ -303,6 +329,8 @@ class App(object):
                 self.toast(T('%s 결승!' % ev[1], '%s finished!' % ev[1]), 1.4, (200, 230, 255))
             elif kind == 'left':
                 self.toast(T('%s 퇴장' % ev[1], '%s left' % ev[1]), 1.4, (255, 150, 150))
+            elif kind == 'item':
+                self.on_item_event(ev)
             elif kind == 'sim':
                 e = ev[1]
                 if e in ('pad', 'miniturbo'):
@@ -314,6 +342,75 @@ class App(object):
                     self.renderer.shake = max(self.renderer.shake, 0.6)
                 elif e.startswith('tier'):
                     self.sfx.play('tier')
+
+    def on_item_event(self, ev):
+        what = ev[1]
+        if what == 'roll':
+            self.sfx.play('iroll', 0.5)
+        elif what == 'get':
+            self.sfx.play('iget')
+            self.toast('%s  ·  %s' % (item_name(ev[2], LANG), item_desc(ev[2], LANG)), 1.8, (200, 235, 255))
+        elif what == 'use':
+            self.sfx.play('iuse', 0.7)
+        elif what == 'hit':
+            self.sfx.play('ihit')
+            self.renderer.shake = max(self.renderer.shake, 0.9)
+            self.toast(fx_name(ev[2], LANG) + '!', 1.2, (255, 110, 110), True)
+        elif what == 'block':
+            self.sfx.play('iblock')
+            self.toast(T('방어!', 'BLOCKED!'), 1.0, (120, 220, 255), True)
+        elif what == 'score':
+            self.toast(T('명중! ', 'HIT! ') + str(ev[2]), 1.2, (255, 220, 90))
+        elif what == 'stolen':
+            self.toast(T('아이템을 도둑맞았어요: ', 'Item stolen: ') + item_name(ev[2], LANG), 1.6, (255, 150, 150))
+
+    def burst(self, x, y, z, n, cols, spd, size, life, up=4.0):
+        rd = self.renderer
+        for i in range(n):
+            a = _random.random() * TAU
+            v = spd * (0.4 + _random.random() * 0.6)
+            rd.emit(x, y, z, math.cos(a) * v, up * (0.3 + _random.random()), math.sin(a) * v, cols[i % len(cols)], size, life * (0.6 + _random.random() * 0.5))
+
+    def item_vfx(self, race, lst):
+        loc = race.local
+        for v in lst:
+            k = v[0]
+            if k == 'box':
+                self.burst(v[1], v[2], v[3], 14, [hue_rgb(i / 7.0) for i in range(7)], 7.0, 0.22, 0.6)
+            elif k == 'boom':
+                x, y, z, r, col = v[1], v[2], v[3], v[4], v[5]
+                self.burst(x, y + 0.5, z, 34, [(255, 150, 40), (255, 230, 120), (255, 70, 40), col], r * 1.6, 0.45, 0.8, 7.0)
+                d = math.hypot(loc.x - x, loc.z - z)
+                if d < r * 3.0:
+                    self.renderer.shake = max(self.renderer.shake, 1.0)
+                if d < 150:
+                    self.sfx.play('iboom', clamp(1.0 - d / 160.0, 0.15, 1.0))
+            elif k == 'ring':
+                x, y, z, r, col = v[1], v[2], v[3], v[4], v[5]
+                for i in range(26):
+                    a = TAU * i / 26
+                    self.renderer.emit(x + math.cos(a) * 1.5, y + 0.6, z + math.sin(a) * 1.5, math.cos(a) * r * 2.2, 1.5, math.sin(a) * r * 2.2, col, 0.4, 0.45)
+            elif k == 'hit':
+                self.burst(v[1], v[2] + 0.8, v[3], 12, [(255, 255, 255), (255, 220, 90)], 6.0, 0.22, 0.5)
+            elif k == 'block':
+                self.burst(v[1], v[2] + 0.8, v[3], 14, [(120, 220, 255), (255, 255, 255)], 7.0, 0.22, 0.5)
+            elif k == 'warp':
+                self.burst(v[1], v[2] + 0.8, v[3], 18, [(170, 90, 255), (60, 230, 255)], 5.0, 0.28, 0.7, 6.0)
+            elif k == 'pop':
+                self.burst(v[1], v[2], v[3], 8, [v[4], (255, 255, 255)], 5.0, 0.2, 0.4)
+            elif k == 'area':
+                it = ITEMS[v[1]]
+                if it['kind'] == 'zap':
+                    for rid in v[3]:
+                        rc = race._find(rid)
+                        if rc is not None:
+                            for j in range(9):
+                                self.renderer.emit(rc.x + (_random.random() - 0.5) * 1.2, rc.y + 1.0 + j * 1.4, rc.z + (_random.random() - 0.5) * 1.2,
+                                                   0.0, 0.0, 0.0, it['c1'] if j % 2 else (255, 255, 255), 0.35, 0.35)
+                    if loc.id in v[3] or it['p'].get('scope') == 'all' or v[2] == loc.id:
+                        self.sfx_screen.flash = 0.32
+                        self.sfx_screen.flash_col = it['c1'] if it['icon'] in ('bolt', 'cloud') else (255, 255, 255)
+                        self.sfx.play('izap', 0.8)
 
     def emit_fx(self, race, dt):
         rd = self.renderer
@@ -369,6 +466,8 @@ class App(object):
             race.update(dt, inp)
             self.handle_race_events(race)
             self.emit_fx(race, dt)
+            if race.items is not None:
+                self.item_vfx(race, race.items.take_vfx())
         loc = race.local
         sim = loc.sim
         self.renderer.update_particles(dt if not self.paused else 0.0)
@@ -413,10 +512,23 @@ class App(object):
         race = self.race
         ui = self.ui
         u = ui.u
+        if race.local is not None and race.local.sim is not None:
+            self.sfx_screen.draw(self.screen, self.W, self.H, race.local.sim.blind_t if race.items is not None else 0.0, dt)
+        if race.items is not None:
+            self.item_rects = draw_item_bar(self, self.screen, race)
+            for i, r in enumerate(self.item_rects):
+                if ui.tapped(r.inflate(int(10 * u), int(10 * u))):
+                    self.use_item(i)
+        else:
+            self.hud_top = 0
         draw_hud(self, self.screen, race, dt)
         if self.touch_visible():
             self.touch.draw(self.screen, ui, self.pressed)
-        pb = R(self.W // 2 - 22 * u, 8 * u, 44 * u, 40 * u)
+        if race.items is not None and self.landscape:
+            r3 = self.item_rects[-1]
+            pb = R(r3.right + 12 * u, 8 * u, 44 * u, 40 * u)
+        else:
+            pb = R(self.W // 2 - 22 * u, 8 * u, 44 * u, 40 * u)
         if ui.button(self.screen, pb, 'II', 'ghost', size=22 * u):
             self.toggle_pause()
         if self.paused:
@@ -558,7 +670,7 @@ class App(object):
         anc = 'l' if land else 'c'
         ui.text(surf, 'TURBO', x, int(self.H * 0.05), 96 * u, (255, 255, 255), anc)
         ui.text(surf, 'KART 3D', x, int(self.H * 0.05) + 86 * u, 70 * u, (255, 176, 32), anc)
-        ui.text(surf, T('맵 1000개 · 카트 100,000종 · WiFi 멀티', '1000 maps · 100,000 karts · WiFi multiplayer'), x, int(self.H * 0.05) + 160 * u, 20 * u, (205, 220, 250), anc)
+        ui.text(surf, T('맵 1000개 · 카트 100,000종 · 아이템 100종 · WiFi 멀티', '1000 maps · 100,000 karts · 100 items · WiFi multiplayer'), x, int(self.H * 0.05) + 160 * u, 20 * u, (205, 220, 250), anc)
         bw = self.W * 0.40 if land else self.W * 0.82
         bx = int(self.W * 0.06) if land else (self.W - bw) / 2
         by = self.H * 0.43 if land else self.H * 0.40
@@ -600,7 +712,15 @@ class App(object):
         d = ui.stepper(surf, R(x, y + 108 * u, w, 44 * u), T('AI 상대', 'AI rivals'), int(self.profile['bots']), 0, 11)
         if d:
             self.profile['bots'] = int(self.profile['bots']) + d
-        ui.text(surf, '%s #%d' % (kart_name(self.profile['kart'], LANG), self.profile['kart'] + 1), x, y + 166 * u, 18 * u, (190, 205, 240))
+        half = (w - 10 * u) / 2.0
+        item_mode = self.profile['mode'] == 'item'
+        if ui.button(surf, R(x, y + 160 * u, half, 40 * u), T('스피드전', 'Speed'), 'chip' if item_mode else 'chipon', size=19 * u):
+            self.profile['mode'] = 'speed'
+            self.profile.save()
+        if ui.button(surf, R(x + half + 10 * u, y + 160 * u, half, 40 * u), T('아이템전', 'Items'), 'chipon' if item_mode else 'chip', size=19 * u):
+            self.profile['mode'] = 'item'
+            self.profile.save()
+        ui.text(surf, '%s #%d' % (kart_name(self.profile['kart'], LANG), self.profile['kart'] + 1), x, y + 210 * u, 18 * u, (190, 205, 240))
         bh = min(70 * u, rr.h * 0.2)
         if ui.button(surf, R(x, rr.bottom - 14 * u - bh * 2 - 10 * u, w, bh), T('출발!', 'START!'), 'primary', size=bh * 0.5):
             self.profile['map'] = self.sel_map
@@ -830,7 +950,7 @@ class App(object):
             msg = ses.start_msg
             ses.start_msg = None
             entries = ses.entries_from_start(msg)
-            self.start_race(int(msg['map']), int(msg['laps']), entries, True, ses.is_host, float(msg.get('countdown', 5.0)))
+            self.start_race(int(msg['map']), int(msg['laps']), entries, True, ses.is_host, float(msg.get('countdown', 5.0)), bool(msg.get('items')))
             return
         if ses.state == 'idle':
             self.err = ses.error or T('연결이 끊어졌어요', 'Disconnected')
@@ -872,26 +992,35 @@ class App(object):
             return
         # 오른쪽: 설정
         st = ses.settings
-        mid = self.map_picker(R(rr.x, rr.y, rr.w, rr.h - 150 * u), int(st['map']), editable=ses.is_host)
+        mid = self.map_picker(R(rr.x, rr.y, rr.w, rr.h - 196 * u), int(st['map']), editable=ses.is_host)
         if ses.is_host and mid != st['map']:
             ses.send_settings(map=mid)
             self.profile['map'] = mid
-        ui.panel(surf, R(rr.x, rr.bottom - 140 * u, rr.w, 140 * u), 205)
-        sx, sy, sw_ = rr.x + 14 * u, rr.bottom - 134 * u, rr.w - 28 * u
+        ui.panel(surf, R(rr.x, rr.bottom - 186 * u, rr.w, 186 * u), 205)
+        sx, sy, sw_ = rr.x + 14 * u, rr.bottom - 180 * u, rr.w - 28 * u
         half = (sw_ - 12 * u) / 2.0
         d1 = ui.stepper(surf, R(sx, sy + 4 * u, half, 38 * u), T('바퀴', 'Laps'), int(st['laps']), 1, 10) if ses.is_host else 0
         d2 = ui.stepper(surf, R(sx + half + 12 * u, sy + 4 * u, half, 38 * u), T('봇', 'Bots'), int(st['bots']), 0, 11) if ses.is_host else 0
-        if not ses.is_host:
-            ui.text(surf, T('바퀴 %d · 봇 %d' % (st['laps'], st['bots']), 'Laps %d · Bots %d' % (st['laps'], st['bots'])), sx, sy + 8 * u, 22 * u, (230, 235, 255))
+        im = bool(st.get('items'))
+        if ses.is_host:
+            if ui.button(surf, R(sx, sy + 50 * u, half, 38 * u), T('스피드전', 'Speed'), 'chip' if im else 'chipon', size=18 * u):
+                ses.send_settings(items=False)
+                self.profile['mode'] = 'speed'
+            if ui.button(surf, R(sx + half + 12 * u, sy + 50 * u, half, 38 * u), T('아이템전', 'Items'), 'chipon' if im else 'chip', size=18 * u):
+                ses.send_settings(items=True)
+                self.profile['mode'] = 'item'
+        else:
+            mode = T('아이템전', 'Item battle') if im else T('스피드전', 'Speed race')
+            ui.text(surf, T('바퀴 %d · 봇 %d · %s' % (st['laps'], st['bots'], mode), 'Laps %d · Bots %d · %s' % (st['laps'], st['bots'], mode)), sx, sy + 8 * u, 22 * u, (230, 235, 255))
         if d1:
             ses.send_settings(laps=int(st['laps']) + d1)
         if d2:
             ses.send_settings(bots=int(st['bots']) + d2)
         if ses.is_host:
-            if ui.button(surf, R(sx, sy + 56 * u, sw_, 64 * u), T('레이스 시작!', 'START RACE!'), 'primary', size=30 * u):
+            if ui.button(surf, R(sx, sy + 100 * u, sw_, 64 * u), T('레이스 시작!', 'START RACE!'), 'primary', size=30 * u):
                 ses.start_race()
         else:
-            ui.text(surf, T('방장이 시작하기를 기다리는 중…', 'Waiting for the host to start…'), sx + sw_ / 2, sy + 70 * u, 22 * u, (190, 205, 240), 'c')
+            ui.text(surf, T('방장이 시작하기를 기다리는 중…', 'Waiting for the host to start…'), sx + sw_ / 2, sy + 100 * u, 22 * u, (190, 205, 240), 'c')
 
     # ------------------------------------------------------------------ 메인 루프
     def step(self, dt):

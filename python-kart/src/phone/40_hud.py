@@ -156,8 +156,11 @@ def draw_hud(app, surf, race, dt):
         ui.text(surf, T('역주행!', 'WRONG WAY!'), sw // 2, int(sh * 0.36), 50 * u, (255, 80, 90), 'c')
     now = time.time()
     app.toasts = [t for t in app.toasts if t[1] > now]
-    ty = int(sh * 0.16)
+    ty = int(max(sh * 0.16, getattr(app, 'hud_top', 0) + 6 * u))
     for text, until, color, big in app.toasts[-2:]:
-        a = clamp((until - now) * 3.0, 0.0, 1.0)
-        ui.text(surf, text, sw // 2, ty, (62 if big else 38) * u, color, 'c')
-        ty += int((70 if big else 46) * u)
+        size = (62 if big else 38) * u
+        w = ui.render(text, size, color).get_width()
+        if w > sw * 0.94:
+            size = max(10, size * sw * 0.94 / float(w))      # 화면보다 길면 글자를 줄인다
+        ui.text(surf, text, sw // 2, ty, size, color, 'c')
+        ty += int((size + 8 * u) if not big else 70 * u)

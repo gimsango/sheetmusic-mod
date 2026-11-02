@@ -20,7 +20,8 @@ class KartNode(object):
         self.rc = racer
         m = self.model = KartModel(racer.kart_id)
         self.root = parent.attachNewNode('kart-' + str(racer.id))
-        self.yaw = self.root.attachNewNode('yaw')
+        self.spinner = self.root.attachNewNode('spinner')      # 아이템 효과: 스핀/점프
+        self.yaw = self.spinner.attachNewNode('yaw')
         self.chassis = self.yaw.attachNewNode('chassis')
         body = Mesh()
         glow = Mesh()
@@ -109,9 +110,62 @@ class KartNode(object):
             lb.setBin('fixed', 40)
             self.label = lb
         self.spin = 0.0
+        self.t = 0.0
+        self.fx_state = None
+        self.bubble = None
+
+    def _effects(self, rc, dt):
+        """아이템 상태이상 표시: 크기/점프/스핀/무지개(무적)/얼음/유령/방패"""
+        self.t += dt
+        fxb = rc.fx
+        sc = rc.scale
+        if abs(sc - 1.0) > 0.01 or self.fx_state is not None:
+            self.root.setScale(sc)
+        self.spinner.setZ(rc.air_y / max(sc, 0.3))
+        self.spinner.setH(-math.degrees(rc.spin_ang))
+        if fxb & FX_STAR:
+            hc = hue_rgb(self.t * 2.2)
+            cs = (0.6 + hc[0] / 255.0 * 0.9, 0.6 + hc[1] / 255.0 * 0.9, 0.6 + hc[2] / 255.0 * 0.9, 1.0)
+        elif fxb & FX_FREEZE:
+            cs = (0.7, 0.95, 1.6, 1.0)
+        else:
+            cs = None
+        ghost = bool(fxb & FX_GHOST)
+        state = (cs, ghost)
+        if cs is not None or ghost or state != self.fx_state:
+            if cs is None and not ghost:
+                self.spinner.clearColorScale()
+                self.spinner.clearTransparency()
+            else:
+                c = cs or (1.0, 1.0, 1.0, 1.0)
+                self.spinner.setColorScale(c[0], c[1], c[2], 0.35 if ghost else 1.0)
+                if ghost:
+                    self.spinner.setTransparency(TransparencyAttrib.MAlpha)
+                else:
+                    self.spinner.clearTransparency()
+            self.fx_state = state if (cs is not None or ghost) else None
+        if fxb & FX_SHIELD:
+            if self.bubble is None:
+                m = self.model
+                bm = Mesh()
+                bm.sphere((0, 0, 0), 1.0, (0.55, 0.88, 1.0, 0.3), 14, 9)
+                b = bm.attach(self.spinner, 'bubble')
+                b.setTransparency(TransparencyAttrib.MAlpha)
+                b.setLightOff()
+                b.setTwoSided(True)
+                b.setDepthWrite(False)
+                b.setBin('fixed', 20)
+                r = max(m.L, m.W * 1.4) * 0.72
+                b.setScale(r * 0.85, r, r * 0.8)
+                b.setPos(0, 0, m.base + m.H * 0.6)
+                self.bubble = b
+            self.bubble.show()
+        elif self.bubble is not None:
+            self.bubble.hide()
 
     def update(self, rc, dt, ds, cam_dist):
         m = self.model
+        self._effects(rc, dt)
         pos = PV(rc.x, rc.y, rc.z)
         up = rc.up
         h = rc.h
@@ -213,7 +267,7 @@ class Weather(object):
     def __init__(self, app, kind):
         self.app = app
         self.kind = kind
-        self.n = 700 if kind == 'snow' else 380
+        self.n = 520 if kind == 'snow' else 320
         fmt = GeomVertexFormat.getV3()
         self.vd = GeomVertexData('weather', fmt, Geom.UHDynamic)
         self.vd.setNumRows(self.n)

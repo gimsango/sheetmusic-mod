@@ -4,7 +4,8 @@
 # ----------------------------------------------------------------------------
 class Profile(dict):
     DEFAULTS = {'name': '', 'kart': None, 'map': 1, 'laps': 3, 'bots': 7, 'quality': 1, 'auto_gas': True, 'sound': True,
-                'lang': 'auto', 'last_ip': '', 'port': DEFAULT_PORT, 'steer_mode': 'buttons', 'steer_resp': 1}
+                'lang': 'auto', 'last_ip': '', 'port': DEFAULT_PORT, 'steer_mode': 'buttons', 'steer_resp': 1,
+                'mode': 'item'}           # 'item' = 아이템전, 'speed' = 스피드전
 
     def __init__(self, filename='kart3d_profile.json'):
         dict.__init__(self)

@@ -69,6 +69,13 @@ class Sfx(object):
         S['finish'] = self._tone(520, 700, 0.3, 'tri', 2.0)
         S['click'] = self._tone(900, 40, 0.2, 'tri')
         S['drift'] = self._noise(260, 0.16, False, True)
+        S['iroll'] = self._tone(1300, 30, 0.12, 'square')
+        S['iget'] = self._tone(880, 150, 0.26, 'tri', 1.5)
+        S['iuse'] = self._noise(220, 0.3, True)
+        S['ihit'] = self._tone(190, 280, 0.45, 'square', 0.4)
+        S['iboom'] = self._noise(650, 0.55)
+        S['izap'] = self._tone(1500, 320, 0.25, 'square', 0.25)
+        S['iblock'] = self._tone(1250, 170, 0.26, 'tri', 1.2)
         for i, f0 in enumerate((58.0, 74.0, 95.0, 122.0, 156.0, 200.0)):
             dur = 0.2
             cycles = max(1, int(round(f0 * dur)))

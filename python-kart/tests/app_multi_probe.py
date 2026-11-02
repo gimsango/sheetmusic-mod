@@ -24,7 +24,7 @@ pg.image.save(app.screen, os.path.join(out, 'mp_lobby.png'))
 app.session.start_race()
 for _ in range(40): app.step(1 / 60.); S2.pump(); time.sleep(0.01)
 assert app.scene == 'race' and S2.start_msg, (app.scene, S2.start_msg)
-R2 = K.Race(4, 2, S2.entries_from_start(S2.start_msg), multi=True, is_host=S2.is_host, countdown=0.0, net=S2.net, auto_local=True)
+R2 = K.Race(4, 2, S2.entries_from_start(S2.start_msg), multi=True, is_host=S2.is_host, countdown=0.0, net=S2.net, auto_local=True, items=bool(S2.start_msg.get('items')))
 race = app.race; race.auto_local = True; race.start_at = time.monotonic() - 1
 for f in range(60 * 14):
     for m in S2.pump(): R2.handle_message(m)

@@ -6,6 +6,9 @@ def wrap_map(m):
     return ((int(m) - 1) % MAP_COUNT) + 1
 
 
+ITEM_KEYS_PC = {'1': 0, '2': 1, '3': 2, 'face_x': 0, 'face_y': 1, 'face_b': 2}
+
+
 class Game(ShowBase):
     def __init__(self, args):
         global LANG
@@ -45,6 +48,10 @@ class Game(ShowBase):
         self.input = TextInput(self)
         self.hud = HUD(self)
         self.hud.show(False)
+        self.item_hud = ItemHUD(self)
+        self.screen_fx = ScreenFxPC(self)
+        self.item_world = None
+        self.brake_held = False
         self.keys = set()
         self.steer = 0.0
         self.scene = 'menu'
@@ -83,7 +90,7 @@ class Game(ShowBase):
         except Exception:
             pass
         names = ['arrow_up', 'arrow_down', 'arrow_left', 'arrow_right', 'w', 'a', 's', 'd', 'space', 'lshift', 'rshift', 'lcontrol', 'rcontrol',
-                 'r', 'm', 'enter', 'escape', 'f11', 'backspace', 't']
+                 'r', 'm', 'enter', 'escape', 'f11', 'backspace', 't', '1', '2', '3', 'face_x', 'face_y', 'face_b']
         for k in names:
             self.accept(k, self._kdown, [k])
             self.accept(k + '-up', self._kup, [k])
@@ -133,7 +140,9 @@ class Game(ShowBase):
                 pass
             return
         if self.scene == 'race':
-            if k == 'r' and self.race:
+            if k in ITEM_KEYS_PC:
+                self.use_item(ITEM_KEYS_PC[k])
+            elif k == 'r' and self.race:
                 self.race.respawn_local()
             elif k == 'escape':
                 self.toggle_pause()
@@ -201,6 +210,9 @@ class Game(ShowBase):
         if self.weather is not None:
             self.weather.destroy()
             self.weather = None
+        if self.item_world is not None:
+            self.item_world.destroy()
+            self.item_world = None
         if self.world is not None:
             self.world.destroy()
             self.world = None
@@ -264,6 +276,8 @@ class Game(ShowBase):
         self.menu.clear_extra()
         if scene != 'race':
             self.hud.show(False)
+            self.item_hud.show(False)
+            self.screen_fx.clear()
             self.menu.show(True)
         if scene == 'menu':
             self.build_main()
@@ -290,7 +304,7 @@ class Game(ShowBase):
         if self.err:
             rows.append(self.I(self.err, (1, 0.5, 0.5, 1)))
         rows.append(self.I('%s  #%d' % (kart_name(self.profile['kart'], LANG), int(self.profile['kart']) + 1), scale=0.045))
-        self.menu.set('TURBO KART 3D', rows, T('맵 1000개 · 카트 100,000종 · WiFi 멀티', '1000 maps · 100,000 karts · WiFi multiplayer'), T('↑↓ 선택   Enter 확인   F11 전체화면', 'Up/Down select   Enter OK   F11 fullscreen'))
+        self.menu.set('TURBO KART 3D', rows, T('맵 1000개 · 카트 100,000종 · 아이템 100종 · WiFi 멀티', '1000 maps · 100,000 karts · 100 items · WiFi multiplayer'), T('↑↓ 선택   Enter 확인   F11 전체화면', 'Up/Down select   Enter OK   F11 fullscreen'))
 
     # ---- 솔로 ----
     def draw_outline(self, mid):
@@ -366,7 +380,14 @@ class Game(ShowBase):
             self.profile['map'] = self.sel_map
             self.profile.save()
             self.start_solo()
-        rows = [self.R('%s  < #%d / %d >' % (T('맵', 'Map'), mid, MAP_COUNT), typemap, chg(-1), chg(1), id='map'),
+
+        def mode(m=1):
+            self.profile['mode'] = 'speed' if self.profile['mode'] == 'item' else 'item'
+            self.profile.save()
+            self.build_solo()
+        mname = T('아이템전 (아이템 100종)', 'Item battle (100 items)') if self.profile['mode'] == 'item' else T('스피드전', 'Speed race')
+        rows = [self.R('%s  < %s >' % (T('모드', 'Mode'), mname), mode, mode, mode, id='mode'),
+                self.R('%s  < #%d / %d >' % (T('맵', 'Map'), mid, MAP_COUNT), typemap, chg(-1), chg(1), id='map'),
                 self.R('%s  < %s >' % (T('테마', 'Theme'), theme), None, settheme(-1), settheme(1), id='theme'),
                 self.R('%s  < %d >' % (T('바퀴 수', 'Laps'), int(self.profile['laps'])), None, lap(-1), lap(1), id='laps'),
                 self.R('%s  < %d >' % (T('AI 상대', 'AI rivals'), int(self.profile['bots'])), None, bots(-1), bots(1), id='bots'),
@@ -566,14 +587,21 @@ class Game(ShowBase):
                 def f(m=1):
                     ses.send_settings(bots=int(clamp(int(st['bots']) + d, 0, 11)))
                 return f
-            rows += [self.R('%s  < #%d >' % (T('맵', 'Map'), st['map']), None, mp(-1), mp(1), id='map'),
+
+            def md(m=1):
+                on = not bool(st.get('items'))
+                ses.send_settings(items=on)
+                self.profile['mode'] = 'item' if on else 'speed'
+            rows += [self.R('%s  < %s >' % (T('모드', 'Mode'), T('아이템전', 'Item battle') if st.get('items') else T('스피드전', 'Speed race')), md, md, md, id='mode'),
+                     self.R('%s  < #%d >' % (T('맵', 'Map'), st['map']), None, mp(-1), mp(1), id='map'),
                      self.R('%s  < %d >' % (T('바퀴 수', 'Laps'), st['laps']), None, lp(-1), lp(1), id='laps'),
                      self.R('%s  < %d >' % (T('AI 봇', 'Bots'), st['bots']), None, bp(-1), bp(1), id='bots'),
                      self.R(T('레이스 시작!', 'START RACE!'), ses.start_race, kind='primary', id='start')]
             ips = local_ips()
             rows.append(self.I(T('친구에게 알려주세요: ', 'Tell your friends: ') + (ips[0] if ips else '?') + ':%d' % self.profile['port'], (1, 0.86, 0.47, 1)))
         else:
-            rows.append(self.I('%s #%d   %s %d   %s %d' % (T('맵', 'Map'), st['map'], T('바퀴', 'Laps'), st['laps'], T('봇', 'Bots'), st['bots'])))
+            rows.append(self.I('%s #%d   %s %d   %s %d   %s' % (T('맵', 'Map'), st['map'], T('바퀴', 'Laps'), st['laps'], T('봇', 'Bots'), st['bots'],
+                                                             T('아이템전', 'Item battle') if st.get('items') else T('스피드전', 'Speed race'))))
             rows.append(self.I(T('방장이 시작하기를 기다리는 중…', 'Waiting for the host…')))
         rows.append(self.R(T('나가기', 'Leave'), lambda: self.back(), id='leave'))
         self.menu.set(T('로비', 'Lobby'), rows, mname, T('←→ 값 변경 (Shift ±10, Ctrl ±100)', 'Left/Right change (Shift ±10, Ctrl ±100)'))
@@ -586,15 +614,25 @@ class Game(ShowBase):
     def start_solo(self):
         p = self.profile
         entries = solo_entries(p.display_name(), p['kart'], int(p['bots']))
-        self.start_race(int(p['map']), int(p['laps']), entries, False, True, 5.0)
+        self.start_race(int(p['map']), int(p['laps']), entries, False, True, 5.0, p['mode'] == 'item')
 
-    def start_race(self, map_id, laps, entries, multi, is_host, countdown):
+    def use_item(self, slot):
+        if self.race is not None and self.race.items is not None and not (self.paused and not self.race.multi):
+            self.race.use_item(slot, self.brake_held)
+
+    def start_race(self, map_id, laps, entries, multi, is_host, countdown, items=False):
         self.menu.show(False)
         self.menu.clear_extra()
         self.loading(T('맵 생성 중… #%d' % map_id, 'Building map… #%d' % map_id))
         self.destroy_world()
-        self.race = Race(map_id, laps, entries, multi=multi, is_host=is_host, countdown=countdown, net=self.session.net if multi else None)
+        self.race = Race(map_id, laps, entries, multi=multi, is_host=is_host, countdown=countdown, net=self.session.net if multi else None, items=items)
         self.world = World(self, self.race.track)
+        if items:
+            self.item_world = ItemWorld(self, self.race, self.world.root)
+        self.item_hud.reset()
+        self.item_hud.show(items)
+        self.hud.set_item_mode(items)
+        self.screen_fx.clear()
         self.world_map = None
         self.nodes = {rc.id: KartNode(self, rc, self.world.root) for rc in self.race.racers}
         self.particles = Particles(self)
@@ -611,7 +649,11 @@ class Game(ShowBase):
         self.audio.silence()
         self.scene = 'race'
         self.loading_done()
-        self.hud.say(T('↑ 가속   ← → 조향   Space 드리프트   R 복귀', 'Up gas   Left/Right steer   Space drift   R reset'), 6.0, False, (1, 1, 1, 1))
+        if items:
+            self.hud.say(T('↑ 가속  ← → 조향  Space 드리프트  1·2·3 아이템 (↓ 누른 채 = 뒤로)  R 복귀',
+                           'Up gas  Left/Right steer  Space drift  1·2·3 items (hold Down = throw back)  R reset'), 6.0, False, (1, 1, 1, 1))
+        else:
+            self.hud.say(T('↑ 가속   ← → 조향   Space 드리프트   R 복귀', 'Up gas   Left/Right steer   Space drift   R reset'), 6.0, False, (1, 1, 1, 1))
 
     def toggle_pause(self):
         if self.race is None or self.scene == 'results':
@@ -658,6 +700,7 @@ class Game(ShowBase):
                 drift = drift or pad.findButton(GamepadButton.face_a()).pressed or pad.findButton(GamepadButton.rshoulder()).pressed
             except Exception:
                 pass
+        self.brake_held = brk > 0.5
         self.steer = steer_step(self.steer, tgt, dt, self.profile['steer_resp'])
         return {'steer': self.steer, 'throttle': thr, 'brake': brk, 'drift': drift}
 
@@ -681,6 +724,8 @@ class Game(ShowBase):
                 self.hud.say(T('%s 결승!' % ev[1], '%s finished!' % ev[1]), 1.4, False, (0.8, 0.9, 1, 1))
             elif kind == 'left':
                 self.hud.say(T('%s 퇴장' % ev[1], '%s left' % ev[1]), 1.4, False, (1, 0.6, 0.6, 1))
+            elif kind == 'item':
+                self.on_item_event(ev)
             elif kind == 'sim':
                 e = ev[1]
                 if e in ('pad', 'miniturbo'):
@@ -692,6 +737,84 @@ class Game(ShowBase):
                     self.shake = max(self.shake, 0.6)
                 elif e.startswith('tier'):
                     self.audio.play('tier')
+
+    def on_item_event(self, ev):
+        what = ev[1]
+        if what == 'roll':
+            self.audio.play('iroll', 0.5)
+        elif what == 'get':
+            self.audio.play('iget')
+            self.hud.say('%s  ·  %s' % (item_name(ev[2], LANG), item_desc(ev[2], LANG)), 1.8, False, (0.78, 0.92, 1, 1))
+        elif what == 'use':
+            self.audio.play('iuse', 0.7)
+        elif what == 'hit':
+            self.audio.play('ihit')
+            self.shake = max(self.shake, 0.9)
+            self.hud.say(fx_name(ev[2], LANG) + '!', 1.2, True)
+        elif what == 'block':
+            self.audio.play('iblock')
+            self.hud.say(T('방어!', 'BLOCKED!'), 1.0, True)
+        elif what == 'score':
+            self.hud.say(T('명중! ', 'HIT! ') + str(ev[2]), 1.2, False, (1, 0.86, 0.35, 1))
+        elif what == 'stolen':
+            self.hud.say(T('아이템을 도둑맞았어요: ', 'Item stolen: ') + item_name(ev[2], LANG), 1.6, False, (1, 0.6, 0.6, 1))
+
+    def burst(self, x, y, z, n, cols, spd, size, life, up=4.0):
+        pa = self.particles
+        if pa is None:
+            return
+        for i in range(n):
+            a = _random.random() * TAU
+            v = spd * (0.4 + _random.random() * 0.6)
+            c = cols[i % len(cols)]
+            pa.emit(PV(x, y, z), PV(math.cos(a) * v, up * (0.3 + _random.random()), math.sin(a) * v), (c[0] / 255.0, c[1] / 255.0, c[2] / 255.0),
+                    size, life * (0.6 + _random.random() * 0.5))
+
+    def item_vfx(self, race, lst):
+        loc = race.local
+        for v in lst:
+            k = v[0]
+            if k == 'box':
+                self.burst(v[1], v[2], v[3], 14, [hue_rgb(i / 7.0) for i in range(7)], 7.0, 0.45, 0.6)
+            elif k == 'boom':
+                x, y, z, r, col = v[1], v[2], v[3], v[4], v[5]
+                self.burst(x, y + 0.5, z, 36, [(255, 150, 40), (255, 230, 120), (255, 70, 40), col], r * 1.6, 1.0, 0.8, 7.0)
+                d = math.hypot(loc.x - x, loc.z - z)
+                if d < r * 3.0:
+                    self.shake = max(self.shake, 1.0)
+                if d < 150:
+                    self.audio.play('iboom', clamp(1.0 - d / 160.0, 0.15, 1.0))
+            elif k == 'ring':
+                x, y, z, r, col = v[1], v[2], v[3], v[4], v[5]
+                if self.particles is not None:
+                    for i in range(28):
+                        a = TAU * i / 28
+                        self.particles.emit(PV(x + math.cos(a) * 1.5, y + 0.6, z + math.sin(a) * 1.5), PV(math.cos(a) * r * 2.2, 1.5, math.sin(a) * r * 2.2),
+                                            (col[0] / 255.0, col[1] / 255.0, col[2] / 255.0), 0.9, 0.45)
+            elif k == 'hit':
+                self.burst(v[1], v[2] + 0.8, v[3], 12, [(255, 255, 255), (255, 220, 90)], 6.0, 0.5, 0.5)
+            elif k == 'block':
+                self.burst(v[1], v[2] + 0.8, v[3], 14, [(120, 220, 255), (255, 255, 255)], 7.0, 0.5, 0.5)
+            elif k == 'warp':
+                self.burst(v[1], v[2] + 0.8, v[3], 18, [(170, 90, 255), (60, 230, 255)], 5.0, 0.6, 0.7, 6.0)
+            elif k == 'pop':
+                self.burst(v[1], v[2], v[3], 8, [v[4], (255, 255, 255)], 5.0, 0.45, 0.4)
+            elif k == 'area':
+                it = ITEMS[v[1]]
+                if it['kind'] == 'zap':
+                    for rid in v[3]:
+                        rc = race._find(rid)
+                        if rc is not None and self.particles is not None:
+                            c = it['c1']
+                            for j in range(10):
+                                cc = (c[0] / 255.0, c[1] / 255.0, c[2] / 255.0) if j % 2 else (1, 1, 1)
+                                self.particles.emit(PV(rc.x + (_random.random() - 0.5) * 1.2, rc.y + 1.0 + j * 1.4, rc.z + (_random.random() - 0.5) * 1.2),
+                                                    (0, 0, 0), cc, 0.8, 0.35)
+                    if loc.id in v[3] or it['p'].get('scope') == 'all' or v[2] == loc.id:
+                        c = it['c1'] if it['icon'] in ('bolt', 'cloud') else (255, 255, 255)
+                        self.screen_fx.flash = 0.32
+                        self.screen_fx.flash_col = (c[0] / 255.0, c[1] / 255.0, c[2] / 255.0)
+                        self.audio.play('izap', 0.8)
 
     def emit_fx(self, race, dt):
         pa = self.particles
@@ -748,6 +871,8 @@ class Game(ShowBase):
             race.update(dt, inp)
             self.handle_events(race)
             self.emit_fx(race, dt)
+            if race.items is not None:
+                self.item_vfx(race, race.items.take_vfx())
         loc = race.local
         sim = loc.sim
         # 카트 노드 동기화
@@ -777,7 +902,15 @@ class Game(ShowBase):
         if self.weather is not None:
             self.weather.update(dt, pos)
         self.hud.update(race, time.time())
-        self.hud.fps.setText(('%d fps' % int(1.0 / max(dt, 1e-3))) if self.show_fps else '')
+        if race.items is not None:
+            if self.item_world is not None:
+                self.item_world.update(dt)
+            self.item_hud.update(race, self.t)
+            self.screen_fx.update(sim.blind_t, dt)
+        self._fps_t = getattr(self, '_fps_t', 0.0) + dt
+        if self._fps_t > 0.25:
+            self._fps_t = 0.0
+            self.hud._set(self.hud.fps, ('%d fps' % int(1.0 / max(dt, 1e-3))) if self.show_fps else '')
         if not self.paused:
             self.audio.engine(ratio, 1.0 if inp['throttle'] > 0 else 0.2, loc.drifting, loc.offroad)
         # 결과 화면
@@ -830,7 +963,7 @@ class Game(ShowBase):
                     msg = self.session.start_msg
                     self.session.start_msg = None
                     entries = self.session.entries_from_start(msg)
-                    self.start_race(int(msg['map']), int(msg['laps']), entries, True, self.session.is_host, float(msg.get('countdown', 5.0)))
+                    self.start_race(int(msg['map']), int(msg['laps']), entries, True, self.session.is_host, float(msg.get('countdown', 5.0)), bool(msg.get('items')))
                     return task.cont
                 if self.session.state == 'idle':
                     self.err = self.session.error or T('연결 실패', 'Connection failed')

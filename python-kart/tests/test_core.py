@@ -48,7 +48,7 @@ S2.join_game('127.0.0.1', port); pump(S1, S2, secs=0.6)
 print('lobby:', S1.state, S2.state, [p['name'] for p in S1.players], 'host?', S1.is_host, S2.is_host)
 assert S1.state == 'lobby' and S2.state == 'lobby' and S1.is_host and not S2.is_host and len(S1.players) == 2
 S1.send_settings(map=321, laps=2, bots=2); pump(S1, S2, secs=0.4)
-assert S2.settings == {'map': 321, 'laps': 2, 'bots': 2}, S2.settings
+assert {k: S2.settings[k] for k in ('map', 'laps', 'bots')} == {'map': 321, 'laps': 2, 'bots': 2}, S2.settings
 found = []; r = {}
 C.discover_async(r)
 while r.get('busy'): time.sleep(0.05)
