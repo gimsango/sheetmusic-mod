@@ -343,7 +343,10 @@ class ThemeGfx(object):
         self.sky_top = hex_rgb(th['sky_top'])
         self.sky_bot = hex_rgb(th['sky_bot'])
         self.sprites = {}
-        self.scaled = {}
+        self.scaled = {}          # 크기 맞춘 스프라이트 캐시 (이번 세대)
+        self.scaled_old = {}      # 직전 세대: 다시 쓰이면 이번 세대로 옮겨 살린다
+        self.scaled_px = 0        # 이번 세대가 차지한 픽셀 수 (메모리 상한용)
+        self.fog_masks = {}       # 안개 단계별 알파 곱하기 판
         self._make_palette()
         self._make_fog_lut()
         self.sky = self._make_sky()
@@ -353,6 +356,33 @@ class ThemeGfx(object):
         self.sun_az = math.atan2(th['sun_dir'][0], th['sun_dir'][2])
         sd = th['sun_dir']
         self.sun_el = math.asin(sd[1] / math.sqrt(sd[0] ** 2 + sd[1] ** 2 + sd[2] ** 2))
+        self._make_bg()
+
+    def _make_bg(self):
+        """하늘 + 별/구름/오로라 + 지평선을 미리 한 장(불투명)으로 합성해 둔다.
+        매 프레임 반투명 그림 여러 장을 섞던 것을 '복사 두 번'으로 바꿔서 빠르다 (보이는 그림은 같음).
+        해/달은 여기 넣지 않고 매 프레임 원래 위치 계산 그대로, 해 주변 사각형만 원래 순서로 다시 그린다."""
+        pano, fx_, sky = self.pano, self.skyfx, self.sky
+        pw = pano.get_width()
+        sh = sky.get_height()
+        extra = 3                                        # 구름(+2)/지평선(+3)이 지평선 아래로 내려오는 줄 수
+        H = sh + extra
+        try:
+            bg = pygame.Surface((pw, H), 0, pygame.display.get_surface())
+        except Exception:
+            bg = pygame.Surface((pw, H))
+        x = 0
+        while x < pw:
+            bg.blit(sky, (x, 0))
+            x += sky.get_width()
+        bg.fill(self.ground_far, (0, sh, pw, extra))
+        bg.blit(fx_, (0, sh - fx_.get_height() + 2))
+        bg.blit(pano, (0, sh - pano.get_height() + 3))
+        self.bg = bg
+        self.bg_sky_h = sh
+        self.bg_extra = extra
+        self.sun_r = max(3, int(self.rh * (0.028 if not self.night else 0.04)))
+        self.sun_col = mix_rgb(hex_rgb(self.th['sun']), (255, 255, 255), 0.6)
 
     # ---- 색상표 -----------------------------------------------------------------
     def _make_palette(self):
@@ -509,18 +539,56 @@ class ThemeGfx(object):
             sp = self.sprites[k] = make_sprite(kind, self.th, var)
         return sp
 
-    def scaled_sprite(self, kind, var, wpx, hpx):
+    def scaled_sprite(self, kind, var, wpx, hpx, lv=0):
         """월드 크기를 화면 픽셀 크기로 맞춘 스프라이트 (로그 간격 양자화 캐시: 크기가 연속으로 변해도 캐시 적중)"""
         qw = max(2, int(_QB ** round(math.log(max(wpx, 1.0)) / _QL)))
         qh = max(2, int(_QB ** round(math.log(max(hpx, 1.0)) / _QL)))
-        key = (kind, var, qw, qh)
-        sp = self.scaled.get(key)
+        sp = self.scaled.get((kind, var, qw, qh, lv))
         if sp is None:
-            if len(self.scaled) > 1200:
-                self.scaled.clear()
-            sp = self.scaled[key] = pygame.transform.scale(self.sprite(kind, var), (qw, qh))
+            sp = self.scaled_entry(kind, var, qw, qh, lv)
         return sp
+
+    def scaled_entry(self, kind, var, qw, qh, lv):
+        """캐시에 없는 크기의 스프라이트. 안개(lv)는 알파 채널에 미리 곱해 둔다 (같은 그림, 4배 빠른 그리기 경로)
+
+        캐시는 두 세대로 관리한다: 이번 세대가 꽉 차면 통째로 '직전 세대'가 되고, 직전 세대에서 다시 쓰인 것만
+        살아남는다. 화면에 보이는 스프라이트는 버려지지 않아서 끊김이 없고, 메모리도 픽셀 수로 묶인다."""
+        key = (kind, var, qw, qh, lv)
+        sp = self.scaled_old.pop(key, None)
+        if sp is None:
+            sp = pygame.transform.scale(self.sprite(kind, var), (qw, qh))
+            if lv:
+                self._fog_mult(sp, lv)
+        sc = self.scaled
+        if len(sc) >= _CACHE_N or self.scaled_px > _CACHE_PX:
+            self.scaled_old = sc
+            sc = self.scaled = {}
+            self.scaled_px = 0
+        sc[key] = sp
+        self.scaled_px += qw * qh
+        return sp
+
+    def _fog_mult(self, sp, lv):
+        """sp 의 알파에 (255 - lv*15)/255 를 곱한다. fill(BLEND_RGBA_MULT) 와 픽셀까지 같은 결과지만
+        미리 칠해 둔 판을 블릿하는 쪽이 10배 이상 빠르다 (큰 건물 스프라이트에서 끊김의 원인이었음)"""
+        w, h = sp.get_size()
+        if w > 2048 or h > 2048:
+            sp.fill((255, 255, 255, 255 - lv * 15), special_flags=pygame.BLEND_RGBA_MULT)
+            return
+        m = self.fog_masks.get(lv)
+        if m is None or m.get_width() < w or m.get_height() < h:
+            mw, mh = (m.get_width(), m.get_height()) if m is not None else (64, 64)
+            while mw < w:
+                mw *= 2
+            while mh < h:
+                mh *= 2
+            m = pygame.Surface((mw, mh), pygame.SRCALPHA)
+            m.fill((255, 255, 255, 255 - lv * 15))
+            self.fog_masks[lv] = m
+        sp.blit(m, (0, 0), (0, 0, w, h), special_flags=pygame.BLEND_RGBA_MULT)
 
 
 _QB = 1.12
+_CACHE_N = 1400            # 세대당 최대 장수
+_CACHE_PX = 3000000        # 세대당 최대 픽셀 (약 12MB) - 두 세대 합쳐도 24MB 안팎 (크게 잡으면 오히려 느려짐)
 _QL = math.log(_QB)

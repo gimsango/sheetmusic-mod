@@ -906,6 +906,7 @@ class Game(ShowBase):
         d = PV(math.sin(yaw) * math.cos(pitch), -math.sin(pitch), math.cos(yaw) * math.cos(pitch))
         self.camera.setPos(*pos)
         self.camera.lookAt(Point3(pos[0] + d[0] * 20, pos[1] + d[1] * 20, pos[2] + d[2] * 20), Vec3(0, 0, 1))
+        self.cam_pos, self.cam_fwd = pos, d          # 카메라 뒤 물체 갱신 생략용
         ratio = loc.speed / sim.stats['max_speed']
         self.camLens.setFov(82 + clamp(ratio, 0, 1.2) * 8 + (6 if loc.boosting else 0))
         self.world.update(pos)

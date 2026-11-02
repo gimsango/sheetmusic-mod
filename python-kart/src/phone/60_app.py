@@ -90,7 +90,6 @@ class App(object):
         self.scan = {'busy': False, 'rooms': [], 'done': False}
         self.err = ''
         self.sel_map = int(self.profile['map'])
-        self.slow_t = 0.0
         self.fps_ema = 60.0
         self.show_fps = bool(args.get('fps'))
         self.finish_at = None
@@ -489,16 +488,8 @@ class App(object):
         self.draw_labels()
         if not self.paused:
             self.sfx.engine(clamp(ratio, 0, 1.3), 1.0 if inp['throttle'] > 0 else 0.2, loc.boosting, loc.drifting, loc.offroad)
-        # 성능 자동 조절
+        # 프레임 측정 (표시용 - 화질/해상도는 절대 자동으로 낮추지 않는다)
         self.fps_ema += (1.0 / max(dt, 1e-3) - self.fps_ema) * 0.05
-        if self.fps_ema < 24 and self.renderer.q > 0 and race.phase == 'run':
-            self.slow_t += dt
-            if self.slow_t > 3.0:
-                self.slow_t = 0.0
-                self.set_quality(self.renderer.q - 1)
-                self.toast(T('프레임 향상을 위해 그래픽 품질을 낮췄어요', 'Lowered graphics for smoother play'), 2.5, (255, 255, 255))
-        else:
-            self.slow_t = 0.0
 
     def draw_labels(self):
         rd = self.renderer

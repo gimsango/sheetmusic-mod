@@ -5929,6 +5929,12 @@ class KartNode(object):
         self.t = 0.0
         self.fx_state = None
         self.bubble = None
+        # 마지막으로 노드에 넣은 값 (같으면 다시 넣지 않는다 - 보이는 건 같고 계산만 줄어듦)
+        self._sz = self._sh = 0.0
+        self._steer_h = 0.0
+        self._flame_on = False
+        self._label_vis = None
+        self._label_sc = None
 
     def _effects(self, rc, dt):
         """아이템 상태이상 표시: 크기/점프/스핀/무지개(무적)/얼음/유령/방패"""
@@ -5937,8 +5943,12 @@ class KartNode(object):
         sc = rc.scale
         if abs(sc - 1.0) > 0.01 or self.fx_state is not None:
             self.root.setScale(sc)
-        self.spinner.setZ(rc.air_y / max(sc, 0.3))
-        self.spinner.setH(-math.degrees(rc.spin_ang))
+        sz = rc.air_y / max(sc, 0.3)
+        sh = -math.degrees(rc.spin_ang)
+        if sz != self._sz or sh != self._sh:          # 값이 바뀔 때만 (대부분 0 그대로)
+            self._sz, self._sh = sz, sh
+            self.spinner.setZ(sz)
+            self.spinner.setH(sh)
         if fxb & FX_STAR:
             hc = hue_rgb(self.t * 2.2)
             cs = (0.6 + hc[0] / 255.0 * 0.9, 0.6 + hc[1] / 255.0 * 0.9, 0.6 + hc[2] / 255.0 * 0.9, 1.0)
@@ -6001,21 +6011,38 @@ class KartNode(object):
         self.chassis.setR(self.chassis.getR() + ((-rc.steer * 3.5) - self.chassis.getR()) * min(1.0, dt * 8))
         self.spin -= (rc.speed / m.wheel_r) * dt
         deg = math.degrees(self.spin)
-        for pivot, spin, front in self.wheels:
-            spin.setP(deg)
-            if front:
-                pivot.setH(-rc.steer * 24.0)
-        if rc.boosting:
-            self.flame.show()
-            self.flame.setScale(1, 0.7 + _random.random() * 0.8, 1)
+        steer_h = -rc.steer * 24.0
+        if steer_h != self._steer_h:
+            self._steer_h = steer_h
+            for pivot, spin, front in self.wheels:
+                spin.setP(deg)
+                if front:
+                    pivot.setH(steer_h)
         else:
+            for pivot, spin, front in self.wheels:
+                spin.setP(deg)
+        if rc.boosting:
+            if not self._flame_on:
+                self._flame_on = True
+                self.flame.show()
+            self.flame.setScale(1, 0.7 + _random.random() * 0.8, 1)
+        elif self._flame_on:
+            self._flame_on = False
             self.flame.hide()
-        if self.label is not None:
-            self.label.setScale(0.85 * clamp(cam_dist / 16.0, 0.8, 4.0))
-            if cam_dist < 11 or cam_dist > 220:
-                self.label.hide()
-            else:
-                self.label.show()
+        lb = self.label
+        if lb is not None:
+            vis = not (cam_dist < 11 or cam_dist > 220)
+            if vis:
+                lsc = 0.85 * clamp(cam_dist / 16.0, 0.8, 4.0)
+                if lsc != self._label_sc:
+                    self._label_sc = lsc
+                    lb.setScale(lsc)
+            if vis != self._label_vis:
+                self._label_vis = vis
+                if vis:
+                    lb.show()
+                else:
+                    lb.hide()
 
     def destroy(self):
         self.root.removeNode()
@@ -6092,7 +6119,19 @@ class Weather(object):
         self.vd = GeomVertexData('weather', fmt, Geom.UHDynamic)
         self.vd.setNumRows(self.n * (2 if self.lines else 1))
         rnd = Rng(99)
-        self.pos = [[(rnd() - 0.5) * 160, (rnd() - 0.5) * 160, rnd() * 70, rnd() * 6.28] for _ in range(self.n)]
+        pos = [[(rnd() - 0.5) * 160, (rnd() - 0.5) * 160, rnd() * 70, rnd() * 6.28] for _ in range(self.n)]
+        # 성분별 목록으로 들고 있다가 리스트 내포로 한꺼번에 계산 -> 정점 버퍼에 통째로 복사 (예전과 같은 좌표)
+        self.px = [p[0] for p in pos]
+        self.py = [p[1] for p in pos]
+        self.pz = [p[2] for p in pos]
+        self.ph = [p[3] for p in pos]
+        self.kf = [0.6 + (i % 5) * 0.2 for i in range(self.n)]
+        nv = self.n * (2 if self.lines else 1)
+        try:
+            ok = fmt.getArray(0).getStride() == 12           # float32 x 3 (보통의 Panda3D)
+        except Exception:
+            ok = False
+        self.buf = array.array('f', bytes(12 * nv)) if ok else None
         if self.lines:
             prim = GeomLines(Geom.UHStatic)
             for i in range(self.n):
@@ -6118,27 +6157,47 @@ class Weather(object):
     def update(self, dt, cam):
         self.t += dt
         t = self.t
-        vw = GeomVertexWriter(self.vd, 'vertex')
-        vy, dr = self.vy, self.drift
         cx, cy, cz = cam
-        fire = self.kind == 'firefly'
-        for i, p in enumerate(self.pos):
-            if fire:
-                p[0] += math.cos(t * 0.9 + p[3] * 3.0) * dt * 2.0
-                p[1] += math.sin(t * 0.8 + p[3] * 2.0) * dt * 2.0
-                p[2] += math.sin(t * 0.7 + p[3] * 2.0) * dt * 1.2
-            else:
-                p[2] += vy * dt * (0.6 + (i % 5) * 0.2)
-                p[0] += math.sin(t + p[3]) * dt * dr
-            if p[2] < 0:
-                p[2] += 70
-            elif p[2] > 70:
-                p[2] -= 70
-            x = ((p[0] - cx + 80) % 160) - 80 + cx
-            y = ((p[1] - cy + 80) % 160) - 80 + cy
-            z = p[2] + cz - 25
-            vw.setData3(x, y, z)
+        sin = math.sin
+        if self.kind == 'firefly':
+            cos = math.cos
+            px = self.px = [x + cos(t * 0.9 + p * 3.0) * dt * 2.0 for x, p in zip(self.px, self.ph)]
+            py = self.py = [y + sin(t * 0.8 + p * 2.0) * dt * 2.0 for y, p in zip(self.py, self.ph)]
+            pz = [z + sin(t * 0.7 + p * 2.0) * dt * 1.2 for z, p in zip(self.pz, self.ph)]
+        else:
+            vdt = self.vy * dt
+            dr = self.drift
+            pz = [z + vdt * k for z, k in zip(self.pz, self.kf)]
+            px = self.px = [x + sin(t + p) * dt * dr for x, p in zip(self.px, self.ph)]
+            py = self.py
+        pz = self.pz = [z + 70 if z < 0 else (z - 70 if z > 70 else z) for z in pz]
+        X = [((x - cx + 80) % 160) - 80 + cx for x in px]
+        Y = [((y - cy + 80) % 160) - 80 + cy for y in py]
+        Z = [z + cz - 25 for z in pz]
+        buf = self.buf
+        if buf is not None:
+            A = array.array
             if self.lines:
+                buf[0::6] = A('f', X)
+                buf[1::6] = A('f', Y)
+                buf[2::6] = A('f', Z)
+                buf[3::6] = A('f', [x + 0.12 for x in X])
+                buf[4::6] = A('f', Y)
+                buf[5::6] = A('f', [z + 1.3 for z in Z])
+            else:
+                buf[0::3] = A('f', X)
+                buf[1::3] = A('f', Y)
+                buf[2::3] = A('f', Z)
+            try:
+                self.vd.modifyArrayHandle(0).copyDataFrom(buf)
+                return
+            except Exception:
+                self.buf = None                  # 아주 오래된 Panda3D: 한 점씩 쓰는 방식으로
+        vw = GeomVertexWriter(self.vd, 'vertex')
+        lines = self.lines
+        for x, y, z in zip(X, Y, Z):
+            vw.setData3(x, y, z)
+            if lines:
                 vw.setData3(x + 0.12, y, z + 1.3)
 
     def destroy(self):
@@ -6351,6 +6410,7 @@ class ItemWorld(object):
             q.setLightOff()
             n.setPos(*PV(b['x'], b['y'], b['z']))
             self.boxes.append((n, c))
+        self.box_vis = [True] * len(self.boxes)
 
     def _proto(self, e):
         it = ITEMS[e.item]
@@ -6452,11 +6512,23 @@ class ItemWorld(object):
     def update(self, dt):
         self.t += dt
         t = self.t
-        for b, (n, c) in zip(self.items.boxes, self.boxes):
-            if b['t'] > 0:
-                n.hide()
+        vis = self.box_vis
+        cp = getattr(self.app, 'cam_pos', None)
+        cf = getattr(self.app, 'cam_fwd', None)
+        for i, (b, (n, c)) in enumerate(zip(self.items.boxes, self.boxes)):
+            on = not (b['t'] > 0)
+            if on != vis[i]:                     # 보이기/숨기기는 바뀔 때만
+                vis[i] = on
+                if on:
+                    n.show()
+                else:
+                    n.hide()
+            if not on:
                 continue
-            n.show()
+            # 카메라 뒤(3m 이상)에 있는 상자는 어차피 화면에 안 그려진다 -> 움직임 갱신을 건너뜀.
+            # 다시 앞으로 오면 그 프레임에 바로 최신 위치/색으로 갱신되므로 보이는 그림은 같다.
+            if cp is not None and (b['x'] - cp[0]) * cf[0] + (-b['z'] - cp[1]) * cf[1] + (b['y'] - cp[2]) * cf[2] < -3.0:
+                continue
             n.setPos(*PV(b['x'], b['y'] + math.sin(t * 3.0 + b['ph']) * 0.18, b['z']))
             c.setH(math.degrees(b['ph'] + t * 1.8))
             hc = hue_rgb(t * 0.25 + b['ph'] / TAU)
@@ -6611,17 +6683,26 @@ class Bar(object):
         self.fill.setPos(x, 0, z)
         self.w, self.h = w, h
         self.fill.setColor(*color)
+        self._v = None              # 마지막으로 넣은 값/색/표시 상태 (같으면 다시 넣지 않음)
+        self._col = tuple(color)
+        self._shown = True
         self.set(0.0)
 
     def set(self, v, color=None):
         v = clamp(v, 0.0, 1.0)
-        self.fill.setScale(max(0.0001, self.w * v), 1, self.h)
-        if color:
+        if v != self._v:
+            self._v = v
+            self.fill.setScale(max(0.0001, self.w * v), 1, self.h)
+        if color and color != self._col:
+            self._col = color
             self.fill.setColor(*color)
 
     def show(self, flag=True):
-        for n in (self.back, self.fill):
-            n.show() if flag else n.hide()
+        flag = bool(flag)
+        if flag != self._shown:
+            self._shown = flag
+            for n in (self.back, self.fill):
+                n.show() if flag else n.hide()
 
 
 class HUD(object):
@@ -6694,6 +6775,7 @@ class HUD(object):
             d = self.mini_np.attachNewNode(cmd.generate())
             d.hide()
             self.dots.append(d)
+        self._dot_st = [None] * len(self.dots)
 
     def mm_xy(self, x, z):
         s = 0.5 / self.mm_span
@@ -6749,15 +6831,21 @@ class HUD(object):
         self._set(self.wrong, T('역주행!', 'WRONG WAY!') if (sim.wrong_way and race.phase == 'run' and not loc.finished) else '')
         # 미니맵
         if self.mini_np is not None:
+            st = self._dot_st
+            nr = len(race.racers)
             for i, d in enumerate(self.dots):
-                if i < len(race.racers):
+                if i < nr:
                     rc = race.racers[i]
                     x, z = self.mm_xy(rc.x, rc.z)
                     d.setPos(x, 0, z)
-                    d.setColor(*((1, 0.69, 0.13, 1) if rc is loc else ((1, 0.43, 0.43, 1) if rc.kind == 'bot' else (0.35, 0.9, 1, 1))))
-                    d.setScale(1.7 if rc is loc else 1.0)
-                    d.show()
-                else:
+                    look = (rc is loc, rc.kind)
+                    if st[i] != look:                # 색/크기/표시는 바뀔 때만
+                        st[i] = look
+                        d.setColor(*((1, 0.69, 0.13, 1) if rc is loc else ((1, 0.43, 0.43, 1) if rc.kind == 'bot' else (0.35, 0.9, 1, 1))))
+                        d.setScale(1.7 if rc is loc else 1.0)
+                        d.show()
+                elif st[i] is not False:
+                    st[i] = False
                     d.hide()
 
     def say(self, text, secs=1.2, big=False, color=(1, 0.8, 0.27, 1)):
@@ -7987,6 +8075,7 @@ class Game(ShowBase):
         d = PV(math.sin(yaw) * math.cos(pitch), -math.sin(pitch), math.cos(yaw) * math.cos(pitch))
         self.camera.setPos(*pos)
         self.camera.lookAt(Point3(pos[0] + d[0] * 20, pos[1] + d[1] * 20, pos[2] + d[2] * 20), Vec3(0, 0, 1))
+        self.cam_pos, self.cam_fwd = pos, d          # 카메라 뒤 물체 갱신 생략용
         ratio = loc.speed / sim.stats['max_speed']
         self.camLens.setFov(82 + clamp(ratio, 0, 1.2) * 8 + (6 if loc.boosting else 0))
         self.world.update(pos)

@@ -148,7 +148,7 @@ class UI(object):
         key = (text, int(size), color)
         s = self.cache.get(key)
         if s is None:
-            if len(self.cache) > 500:
+            if len(self.cache) > 900:
                 self.cache.clear()
             s = self.cache[key] = self.font(size).render(text, True, color)
         return s

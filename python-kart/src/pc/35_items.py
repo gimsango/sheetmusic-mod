@@ -205,6 +205,7 @@ class ItemWorld(object):
             q.setLightOff()
             n.setPos(*PV(b['x'], b['y'], b['z']))
             self.boxes.append((n, c))
+        self.box_vis = [True] * len(self.boxes)
 
     def _proto(self, e):
         it = ITEMS[e.item]
@@ -306,11 +307,23 @@ class ItemWorld(object):
     def update(self, dt):
         self.t += dt
         t = self.t
-        for b, (n, c) in zip(self.items.boxes, self.boxes):
-            if b['t'] > 0:
-                n.hide()
+        vis = self.box_vis
+        cp = getattr(self.app, 'cam_pos', None)
+        cf = getattr(self.app, 'cam_fwd', None)
+        for i, (b, (n, c)) in enumerate(zip(self.items.boxes, self.boxes)):
+            on = not (b['t'] > 0)
+            if on != vis[i]:                     # 보이기/숨기기는 바뀔 때만
+                vis[i] = on
+                if on:
+                    n.show()
+                else:
+                    n.hide()
+            if not on:
                 continue
-            n.show()
+            # 카메라 뒤(3m 이상)에 있는 상자는 어차피 화면에 안 그려진다 -> 움직임 갱신을 건너뜀.
+            # 다시 앞으로 오면 그 프레임에 바로 최신 위치/색으로 갱신되므로 보이는 그림은 같다.
+            if cp is not None and (b['x'] - cp[0]) * cf[0] + (-b['z'] - cp[1]) * cf[1] + (b['y'] - cp[2]) * cf[2] < -3.0:
+                continue
             n.setPos(*PV(b['x'], b['y'] + math.sin(t * 3.0 + b['ph']) * 0.18, b['z']))
             c.setH(math.degrees(b['ph'] + t * 1.8))
             hc = hue_rgb(t * 0.25 + b['ph'] / TAU)

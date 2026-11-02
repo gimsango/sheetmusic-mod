@@ -26,6 +26,7 @@ import json
 import array
 import subprocess
 import random as _random
+from operator import itemgetter
 
 
 def _is_android():
@@ -5029,7 +5030,10 @@ class ThemeGfx(object):
         self.sky_top = hex_rgb(th['sky_top'])
         self.sky_bot = hex_rgb(th['sky_bot'])
         self.sprites = {}
-        self.scaled = {}
+        self.scaled = {}          # 크기 맞춘 스프라이트 캐시 (이번 세대)
+        self.scaled_old = {}      # 직전 세대: 다시 쓰이면 이번 세대로 옮겨 살린다
+        self.scaled_px = 0        # 이번 세대가 차지한 픽셀 수 (메모리 상한용)
+        self.fog_masks = {}       # 안개 단계별 알파 곱하기 판
         self._make_palette()
         self._make_fog_lut()
         self.sky = self._make_sky()
@@ -5039,6 +5043,33 @@ class ThemeGfx(object):
         self.sun_az = math.atan2(th['sun_dir'][0], th['sun_dir'][2])
         sd = th['sun_dir']
         self.sun_el = math.asin(sd[1] / math.sqrt(sd[0] ** 2 + sd[1] ** 2 + sd[2] ** 2))
+        self._make_bg()
+
+    def _make_bg(self):
+        """하늘 + 별/구름/오로라 + 지평선을 미리 한 장(불투명)으로 합성해 둔다.
+        매 프레임 반투명 그림 여러 장을 섞던 것을 '복사 두 번'으로 바꿔서 빠르다 (보이는 그림은 같음).
+        해/달은 여기 넣지 않고 매 프레임 원래 위치 계산 그대로, 해 주변 사각형만 원래 순서로 다시 그린다."""
+        pano, fx_, sky = self.pano, self.skyfx, self.sky
+        pw = pano.get_width()
+        sh = sky.get_height()
+        extra = 3                                        # 구름(+2)/지평선(+3)이 지평선 아래로 내려오는 줄 수
+        H = sh + extra
+        try:
+            bg = pygame.Surface((pw, H), 0, pygame.display.get_surface())
+        except Exception:
+            bg = pygame.Surface((pw, H))
+        x = 0
+        while x < pw:
+            bg.blit(sky, (x, 0))
+            x += sky.get_width()
+        bg.fill(self.ground_far, (0, sh, pw, extra))
+        bg.blit(fx_, (0, sh - fx_.get_height() + 2))
+        bg.blit(pano, (0, sh - pano.get_height() + 3))
+        self.bg = bg
+        self.bg_sky_h = sh
+        self.bg_extra = extra
+        self.sun_r = max(3, int(self.rh * (0.028 if not self.night else 0.04)))
+        self.sun_col = mix_rgb(hex_rgb(self.th['sun']), (255, 255, 255), 0.6)
 
     # ---- 색상표 -----------------------------------------------------------------
     def _make_palette(self):
@@ -5195,20 +5226,58 @@ class ThemeGfx(object):
             sp = self.sprites[k] = make_sprite(kind, self.th, var)
         return sp
 
-    def scaled_sprite(self, kind, var, wpx, hpx):
+    def scaled_sprite(self, kind, var, wpx, hpx, lv=0):
         """월드 크기를 화면 픽셀 크기로 맞춘 스프라이트 (로그 간격 양자화 캐시: 크기가 연속으로 변해도 캐시 적중)"""
         qw = max(2, int(_QB ** round(math.log(max(wpx, 1.0)) / _QL)))
         qh = max(2, int(_QB ** round(math.log(max(hpx, 1.0)) / _QL)))
-        key = (kind, var, qw, qh)
-        sp = self.scaled.get(key)
+        sp = self.scaled.get((kind, var, qw, qh, lv))
         if sp is None:
-            if len(self.scaled) > 1200:
-                self.scaled.clear()
-            sp = self.scaled[key] = pygame.transform.scale(self.sprite(kind, var), (qw, qh))
+            sp = self.scaled_entry(kind, var, qw, qh, lv)
         return sp
+
+    def scaled_entry(self, kind, var, qw, qh, lv):
+        """캐시에 없는 크기의 스프라이트. 안개(lv)는 알파 채널에 미리 곱해 둔다 (같은 그림, 4배 빠른 그리기 경로)
+
+        캐시는 두 세대로 관리한다: 이번 세대가 꽉 차면 통째로 '직전 세대'가 되고, 직전 세대에서 다시 쓰인 것만
+        살아남는다. 화면에 보이는 스프라이트는 버려지지 않아서 끊김이 없고, 메모리도 픽셀 수로 묶인다."""
+        key = (kind, var, qw, qh, lv)
+        sp = self.scaled_old.pop(key, None)
+        if sp is None:
+            sp = pygame.transform.scale(self.sprite(kind, var), (qw, qh))
+            if lv:
+                self._fog_mult(sp, lv)
+        sc = self.scaled
+        if len(sc) >= _CACHE_N or self.scaled_px > _CACHE_PX:
+            self.scaled_old = sc
+            sc = self.scaled = {}
+            self.scaled_px = 0
+        sc[key] = sp
+        self.scaled_px += qw * qh
+        return sp
+
+    def _fog_mult(self, sp, lv):
+        """sp 의 알파에 (255 - lv*15)/255 를 곱한다. fill(BLEND_RGBA_MULT) 와 픽셀까지 같은 결과지만
+        미리 칠해 둔 판을 블릿하는 쪽이 10배 이상 빠르다 (큰 건물 스프라이트에서 끊김의 원인이었음)"""
+        w, h = sp.get_size()
+        if w > 2048 or h > 2048:
+            sp.fill((255, 255, 255, 255 - lv * 15), special_flags=pygame.BLEND_RGBA_MULT)
+            return
+        m = self.fog_masks.get(lv)
+        if m is None or m.get_width() < w or m.get_height() < h:
+            mw, mh = (m.get_width(), m.get_height()) if m is not None else (64, 64)
+            while mw < w:
+                mw *= 2
+            while mh < h:
+                mh *= 2
+            m = pygame.Surface((mw, mh), pygame.SRCALPHA)
+            m.fill((255, 255, 255, 255 - lv * 15))
+            self.fog_masks[lv] = m
+        sp.blit(m, (0, 0), (0, 0, w, h), special_flags=pygame.BLEND_RGBA_MULT)
 
 
 _QB = 1.12
+_CACHE_N = 1400            # 세대당 최대 장수
+_CACHE_PX = 3000000        # 세대당 최대 픽셀 (약 12MB) - 두 세대 합쳐도 24MB 안팎 (크게 잡으면 오히려 느려짐)
 _QL = math.log(_QB)
 
 
@@ -5233,6 +5302,36 @@ QUALITY = [  # 내부 해상도 폭, near/mid/far 구간(샘플), 카트 LOD 거
     dict(w=580, near=26, mid=54, far=120, lod0=26.0, lod1=120.0, props=220, parts=True),
 ]
 
+_draw_polygon = pygame.draw.polygon
+_FACE_K = (0.98, 0.86, 0.76, 0.90, 1.12)          # FACES 순서: z+, z-, x+, x-, y+
+_log = math.log
+_HEX_A = tuple(k * math.pi / 3.0 for k in range(6))           # 바퀴 육각형 꼭짓점 각도
+_HEX_B = tuple((k + 0.5) * math.pi / 3.0 for k in range(6))     # 트레드 면 가운데 각도
+
+
+def _prop_metrics(p):
+    """장식물 하나의 (종류, 폭 m, 높이 m, 모양 변형) - 처음 한 번만 계산해서 저장"""
+    kind = p['kind']
+    wm, hm = SPRITE_DIM[kind][0], SPRITE_DIM[kind][1]
+    s = p['s']
+    var = 0
+    if kind == 'building':
+        wm = 14 + p['r1'] * 22
+        hm = 30 + p['r3'] * p['r3'] * 150
+        var = int(p['r2'] * 4)
+    elif kind == 'mesa':
+        wm, hm = wm * (1.2 + p['r1'] * 1.8), hm * (0.8 + p['r2'] * 1.6)
+    elif kind == 'rock':
+        wm, hm = wm * s * 1.3, hm * s * (1.0 + p['r1'] * 0.7)
+    else:
+        wm, hm = wm * s, hm * s
+        nv = PROP_VARS.get(kind, 1)
+        if nv > 1:
+            var = int(p['r1'] * nv) % nv
+    return (kind, wm, hm, var)
+
+
+_DP_KEY = itemgetter(0)
 OFFS = None   # 단면 정점 배치 (Track 마다 hw 가 달라서 set_track 에서 채움)
 K = 12        # 단면당 정점 수
 
@@ -5255,6 +5354,8 @@ class Renderer(object):
         self.cam = Cam()
         self.frame_no = 0
         self.anim_t = 0.0
+        self._cbox = {}
+        self._tire_col = {}
         self.qfont_path = None
         self.qcache = {}
         self.set_quality(quality, sw, sh)
@@ -5465,35 +5566,52 @@ class Renderer(object):
     #  프레임 그리기
     # ============================================================================
     def draw_background(self):
+        """미리 합성해 둔 하늘+구름+지평선 한 장을 카메라 방향에 맞춰 복사 (반투명 섞기 없음).
+        해/달이 보일 때만 해 주변 사각형 안을 원래 순서(하늘 -> 빛무리 -> 해 -> 구름 -> 지평선)로 다시 그려서
+        예전과 픽셀 하나까지 같은 그림이 된다."""
         c = self.cam
         tg = self.tg
         s = self.surf
         f, hx, hy = self.f, self.hx, self.hy
         hor = hy - f * math.tan(c.pitch)
         hori = int(hor)
-        sky = tg.sky
-        s.blit(sky, (0, hori - sky.get_height()))
-        if hori < self.rh:
-            s.fill(tg.ground_far, (0, max(0, hori), self.rw, self.rh - max(0, hori)))
-        # 태양/달
+        bg = tg.bg
+        pw = bg.get_width()
+        x0 = int((hx + f * c.yaw) % pw) - pw
+        y0 = hori - tg.bg_sky_h
+        s.blit(bg, (x0, y0))
+        if x0 + pw < self.rw:
+            s.blit(bg, (x0 + pw, y0))
+        top = hori + tg.bg_extra
+        if top < self.rh:
+            top = max(0, top)
+            s.fill(tg.ground_far, (0, top, self.rw, self.rh - top))
         da = wrap_pi(c.yaw - tg.sun_az)
         if abs(da) < 1.1:
             sx = hx + f * da
             sy = hor - f * math.tan(tg.sun_el)
             g = tg.glow
-            s.blit(g, (int(sx - g.get_width() / 2), int(sy - g.get_height() / 2)))
-            r = max(3, int(self.rh * (0.028 if not tg.night else 0.04)))
-            sc = hex_rgb(tg.th['sun'])
-            pygame.draw.circle(s, mix_rgb(sc, (255, 255, 255), 0.6), (int(sx), int(sy)), r)
-        # 별/구름 + 파노라마
-        pw = tg.pano.get_width()
-        x0 = int((hx + f * c.yaw) % pw) - pw
-        fx_ = tg.skyfx
-        for xx in (x0, x0 + pw):
-            s.blit(fx_, (xx, hori - fx_.get_height() + 2))
-        pano = tg.pano
-        for xx in (x0, x0 + pw):
-            s.blit(pano, (xx, hori - pano.get_height() + 3))
+            gw, gh = g.get_width(), g.get_height()
+            gx, gy = int(sx - gw / 2), int(sy - gh / 2)
+            r = tg.sun_r
+            scx, scy = int(sx), int(sy)
+            box = pygame.Rect(gx, gy, gw, gh).union(pygame.Rect(scx - r - 2, scy - r - 2, r * 2 + 5, r * 2 + 5)).clip(s.get_rect())
+            if box.w > 0 and box.h > 0:
+                clip = s.get_clip()
+                s.set_clip(box)
+                sky = tg.sky
+                s.blit(sky, (0, hori - sky.get_height()))
+                if hori < self.rh:
+                    s.fill(tg.ground_far, (0, max(0, hori), self.rw, self.rh - max(0, hori)))
+                s.blit(g, (gx, gy))
+                pygame.draw.circle(s, tg.sun_col, (scx, scy), r)
+                fx_ = tg.skyfx
+                for xx in (x0, x0 + pw):
+                    s.blit(fx_, (xx, hori - fx_.get_height() + 2))
+                pano = tg.pano
+                for xx in (x0, x0 + pw):
+                    s.blit(pano, (xx, hori - pano.get_height() + 3))
+                s.set_clip(clip)
 
     def draw_world(self, race, focus_idx, dirn):
         tr = self.track
@@ -5571,81 +5689,165 @@ class Renderer(object):
                         items[sl_i].append((dpe + (0.0 if e.kind != 'trap' else 0.3), 7, e))
 
         poly = self.poly
+        q2 = self._q2
+        draw_obj = self._draw_obj
         prev = None
+        prev2 = None
+        prev_ok = False
+        prev_in = False
         prev_i = 0
-        prev_k = 0
         nsec = len(offs)
+        LIM = 2400.0
+        rw, rh = float(self.rw), float(self.rh)
+        near_o = self.qp['near']
         for k in range(nsec - 1, -1, -1):
             i = (focus_idx + dirn * offs[k]) % N
             base = i * K
             pts = []
-            for j in range(K):
-                dx = GX[base + j] - cx
-                dy = GY[base + j] - cy
-                dz = GZ[base + j] - cz
+            p2 = []
+            ok = True
+            inside = True        # 모든 점이 화면 안 -> 사각형 화면 밖 검사가 필요 없음 (결과는 같고 더 빠름)
+            # 10, 11번 점(차선 점선)은 가까운 구간(1칸 간격)에서만 쓰인다
+            for j in range(base, base + (K if offs[k] <= near_o else K - 2)):
+                dx = GX[j] - cx
+                dy = GY[j] - cy
+                dz = GZ[j] - cz
                 xr = -dx * ccy + dz * csy
                 zr = dx * csy + dz * ccy
                 dp = zr * ccp - dy * csp
                 yc = dy * ccp + zr * csp
                 if dp > near:
                     inv = f / dp
-                    pts.append((hx + xr * inv, hy - yc * inv, dp, xr, yc))
+                    sx = hx + xr * inv
+                    sy = hy - yc * inv
+                    pts.append((sx, sy, dp, xr, yc))
+                    p2.append((sx, sy))
+                    if sx < 0.0 or sx > rw or sy < 0.0 or sy > rh:
+                        inside = False
+                        if sx > LIM or sx < -LIM or sy > LIM or sy < -LIM:
+                            ok = False
                 else:
                     pts.append((0.0, 0.0, dp, xr, yc))
+                    p2.append((0.0, 0.0))
+                    ok = False
+                    inside = False
+            if offs[k] > near_o:
+                pts.append(pts[0])
+                pts.append(pts[0])
+                p2.append(p2[0])
+                p2.append(p2[0])
             if prev is not None:
                 A, B = prev, pts
                 stride = offs[k + 1] - offs[k]
                 dpm = (A[0][2] + B[0][2]) * 0.5
                 lv = lut[int(dpm) if dpm < lutmax else lutmax]
-                ia = i if dirn > 0 else prev_i
-                par = (min(i, prev_i) // 4) & 1 if stride == 1 else 0
-                par2 = (min(i, prev_i) // 2) & 1 if stride <= 2 else 0
+                mi = i if i < prev_i else prev_i
+                par = (mi // 4) & 1 if stride == 1 else 0
+                par2 = (mi // 2) & 1 if stride <= 2 else 0
                 grass = pal['grass_b' if par else 'grass_a'][lv]
                 skirt = pal['skirt_b' if par else 'skirt_a'][lv]
-                # 비탈 -> 갓길 -> 연석 -> 도로 순으로 칠함
-                poly(skirt, (A[6], A[4], B[4], B[6]))
-                poly(skirt, (A[5], A[7], B[7], B[5]))
-                poly(grass, (A[4], A[2], B[2], B[4]))
-                poly(grass, (A[3], A[5], B[5], B[3]))
-                if dpm < 170:
-                    kc = pal['kerb_r' if par2 else 'kerb_w'][lv]
-                    poly(kc, (A[2], A[0], B[0], B[2]))
-                    poly(kc, (A[1], A[3], B[3], B[1]))
-                poly(pal['road_b' if par else 'road_a'][lv], (A[0], A[1], B[1], B[0]))
-                if stride == 1 and dpm < 120 and ((min(i, prev_i) // 3) & 1) == 0:
-                    poly(pal['dash'][lv], (A[10], A[11], B[11], B[10]))
+                kerb = dpm < 170
+                dash = stride == 1 and dpm < 120 and ((mi // 3) & 1) == 0
+                kc = pal['kerb_r' if par2 else 'kerb_w'][lv]
+                road = pal['road_b' if par else 'road_a'][lv]
                 w_a = pal['wall_a' if par2 else 'wall_b'][lv]
                 w_b = pal['wall_a2' if par2 else 'wall_b2'][lv]
-                poly(w_a, (A[4], A[8], B[8], B[4]))
-                poly(w_b, (A[9], A[5], B[5], B[9]))
+                # 비탈 -> 갓길 -> 연석 -> 도로 순으로 칠함
+                if inside and prev_in:
+                    A2, B2 = prev2, p2
+                    dpoly = _draw_polygon
+                    dpoly(surf, skirt, (A2[6], A2[4], B2[4], B2[6]))
+                    dpoly(surf, skirt, (A2[5], A2[7], B2[7], B2[5]))
+                    dpoly(surf, grass, (A2[4], A2[2], B2[2], B2[4]))
+                    dpoly(surf, grass, (A2[3], A2[5], B2[5], B2[3]))
+                    if kerb:
+                        dpoly(surf, kc, (A2[2], A2[0], B2[0], B2[2]))
+                        dpoly(surf, kc, (A2[1], A2[3], B2[3], B2[1]))
+                    dpoly(surf, road, (A2[0], A2[1], B2[1], B2[0]))
+                    if dash:
+                        dpoly(surf, pal['dash'][lv], (A2[10], A2[11], B2[11], B2[10]))
+                    dpoly(surf, w_a, (A2[4], A2[8], B2[8], B2[4]))
+                    dpoly(surf, w_b, (A2[9], A2[5], B2[5], B2[9]))
+                elif ok and prev_ok:
+                    A2, B2 = prev2, p2
+                    q2(skirt, A2[6], A2[4], B2[4], B2[6])
+                    q2(skirt, A2[5], A2[7], B2[7], B2[5])
+                    q2(grass, A2[4], A2[2], B2[2], B2[4])
+                    q2(grass, A2[3], A2[5], B2[5], B2[3])
+                    if kerb:
+                        q2(kc, A2[2], A2[0], B2[0], B2[2])
+                        q2(kc, A2[1], A2[3], B2[3], B2[1])
+                    q2(road, A2[0], A2[1], B2[1], B2[0])
+                    if dash:
+                        q2(pal['dash'][lv], A2[10], A2[11], B2[11], B2[10])
+                    q2(w_a, A2[4], A2[8], B2[8], B2[4])
+                    q2(w_b, A2[9], A2[5], B2[5], B2[9])
+                else:
+                    poly(skirt, (A[6], A[4], B[4], B[6]))
+                    poly(skirt, (A[5], A[7], B[7], B[5]))
+                    poly(grass, (A[4], A[2], B[2], B[4]))
+                    poly(grass, (A[3], A[5], B[5], B[3]))
+                    if kerb:
+                        poly(kc, (A[2], A[0], B[0], B[2]))
+                        poly(kc, (A[1], A[3], B[3], B[1]))
+                    poly(road, (A[0], A[1], B[1], B[0]))
+                    if dash:
+                        poly(pal['dash'][lv], (A[10], A[11], B[11], B[10]))
+                    poly(w_a, (A[4], A[8], B[8], B[4]))
+                    poly(w_b, (A[9], A[5], B[5], B[9]))
                 # 결승선 체커
-                lo_i, hi_i = min(i, prev_i), max(i, prev_i)
-                if stride == 1 and dpm < 100 and (lo_i == 0 or (lo_i == N - 1 and hi_i == 0)):
+                hi_i = i if i > prev_i else prev_i
+                if stride == 1 and dpm < 100 and (mi == 0 or (mi == N - 1 and hi_i == 0)):
                     self._checker(A, B, lv)
                 # 이 구간에 속한 오브젝트를 먼 것부터
                 sl = items[k]
                 if sl:
-                    sl.sort(key=lambda t: -t[0])
+                    if len(sl) > 1:
+                        sl.sort(key=_DP_KEY, reverse=True)
                     for it in sl:
-                        code = it[1]
-                        if code == 0:
-                            self._draw_prop(it[2], it[0])
-                        elif code == 1:
-                            self._draw_kart(it[2], it[0], lv)
-                        elif code == 2:
-                            self._draw_pad(it[2])
-                        elif code == 3:
-                            self._draw_lamp(it[2], lv)
-                        elif code == 4:
-                            self._draw_gate()
-                        elif code == 5:
-                            self._draw_arch(it[2])
-                        elif code == 6:
-                            self._draw_ibox(it[2], it[0])
-                        else:
-                            self._draw_ent(it[2], it[0])
+                        draw_obj(it, lv)
             prev = pts
+            prev2 = p2
+            prev_ok = ok
+            prev_in = inside
             prev_i = i
+
+    def _q2(self, col, a, b, c, d):
+        """사각형 빠른 경로: 네 점이 모두 카메라 앞 + 화면 근처일 때 (poly 와 같은 결과)"""
+        ax, ay = a
+        bx, by = b
+        cx, cy = c
+        dx, dy = d
+        if ax < 0.0 and bx < 0.0 and cx < 0.0 and dx < 0.0:
+            return
+        rw = self.rw
+        if ax > rw and bx > rw and cx > rw and dx > rw:
+            return
+        if ay < 0.0 and by < 0.0 and cy < 0.0 and dy < 0.0:
+            return
+        rh = self.rh
+        if ay > rh and by > rh and cy > rh and dy > rh:
+            return
+        _draw_polygon(self.surf, col, (a, b, c, d))
+
+    def _draw_obj(self, it, lv):
+        code = it[1]
+        if code == 0:
+            self._draw_prop(it[2], it[0])
+        elif code == 1:
+            self._draw_kart(it[2], it[0], lv)
+        elif code == 2:
+            self._draw_pad(it[2])
+        elif code == 3:
+            self._draw_lamp(it[2], lv)
+        elif code == 4:
+            self._draw_gate()
+        elif code == 5:
+            self._draw_arch(it[2])
+        elif code == 6:
+            self._draw_ibox(it[2], it[0])
+        else:
+            self._draw_ent(it[2], it[0])
 
     def _dp_of(self, x, y, z):
         c = self.cam
@@ -5672,45 +5874,42 @@ class Renderer(object):
 
     # ---- 장식물 --------------------------------------------------------------------------------
     def _draw_prop(self, p, dp):
-        kind = p['kind']
         c = self.cam
-        dx, dy, dz = p['x'] - c.x, p['y'] - c.y, p['z'] - c.z
-        xr = -dx * c.cy + dz * c.sy
+        dx = p['x'] - c.x
+        dz = p['z'] - c.z
+        dy = p['y'] - c.y
         zr = dx * c.sy + dz * c.cy
         d = zr * c.cp - dy * c.sp
         if d < 3.0:
             return
-        yc = dy * c.cp + zr * c.sp
+        pm = p.get('_ph')
+        if pm is None:
+            pm = p['_ph'] = _prop_metrics(p)
+        kind, wm, hm, var = pm
         inv = self.f / d
+        hpx = inv * hm
+        if hpx < 2.5 or hpx > 1400:
+            return
+        xr = -dx * c.cy + dz * c.sy
+        yc = dy * c.cp + zr * c.sp
         sx = self.hx + xr * inv
         sy = self.hy - yc * inv
-        wm, hm = SPRITE_DIM[kind][0], SPRITE_DIM[kind][1]
-        s = p['s']
-        var = 0
-        if kind == 'building':
-            wm = 14 + p['r1'] * 22
-            hm = 30 + p['r3'] * p['r3'] * 150
-            var = int(p['r2'] * 4)
-        elif kind == 'mesa':
-            wm, hm = wm * (1.2 + p['r1'] * 1.8), hm * (0.8 + p['r2'] * 1.6)
-        elif kind == 'rock':
-            wm, hm = wm * s * 1.3, hm * s * (1.0 + p['r1'] * 0.7)
-        else:
-            wm, hm = wm * s, hm * s
-            nv = PROP_VARS.get(kind, 1)
-            if nv > 1:
-                var = int(p['r1'] * nv) % nv
-        hpx = inv * hm
         wpx = inv * wm
-        if hpx < 2.5 or sy < 0 or sy - hpx > self.rh or sx + wpx * 0.5 < 0 or sx - wpx * 0.5 > self.rw:
-            return
-        if hpx > 1400:
+        if sy < 0 or sy - hpx > self.rh or sx + wpx * 0.5 < 0 or sx - wpx * 0.5 > self.rw:
             return
         tg = self.tg
-        spr = tg.scaled_sprite(kind, var, wpx, hpx)
+        qw = int(_QB ** round(_log(wpx if wpx > 1.0 else 1.0) / _QL))
+        qh = int(_QB ** round(_log(hpx if hpx > 1.0 else 1.0) / _QL))
+        if qw < 2:
+            qw = 2
+        if qh < 2:
+            qh = 2
         lut = tg.fog_lut
-        lv = lut[int(d) if d < len(lut) - 1 else len(lut) - 1]
-        spr.set_alpha(255 - lv * 15 if lv else 255)
+        n = len(lut) - 1
+        lv = lut[int(d) if d < n else n]
+        spr = tg.scaled.get((kind, var, qw, qh, lv))
+        if spr is None:
+            spr = tg.scaled_entry(kind, var, qw, qh, lv)
         self.surf.blit(spr, (int(sx - spr.get_width() / 2), int(sy - spr.get_height() + 1)))
 
     def _draw_lamp(self, data, lv):
@@ -5757,10 +5956,37 @@ class Renderer(object):
         up = tr.surface_normal(0)
         Rv = (tr.rx[0], 0.0, tr.rz[0])
         org = (tr.px[0], tr.py[0], tr.pz[0])
-        self.draw_boxes(org, Rv, up, T, self.gate_boxes, 1.0)
+        self.draw_boxes(org, Rv, up, T, self.gate_boxes, 1.0, persist=True)
 
     # ---- 카트 -----------------------------------------------------------------------------------------
-    def draw_boxes(self, org, Rv, Uv, Fv, boxes, shade, lod_fog=0, scale=1.0, tint=None):
+    def _compiled(self, boxes, persist=False):
+        """박스 목록 -> 모서리 좌표 등을 미리 계산한 형태 (오래 쓰는 목록이면 재사용)"""
+        key = id(boxes)
+        ent = self._cbox.get(key)
+        if ent is not None and ent[0] is boxes:
+            return ent
+        comp = []
+        for bx in boxes:
+            bcx, bcy, bcz, bhx, bhy, bhz, col, tx, ty, glow = bx
+            loc = []
+            for idx in range(8):
+                sx_ = 1 if idx & 4 else -1
+                sy_ = 1 if idx & 2 else -1
+                sz_ = 1 if idx & 1 else -1
+                if sz_ > 0:
+                    lx, ly = bcx + sx_ * bhx * tx, bcy + sy_ * bhy * ty
+                else:
+                    lx, ly = bcx + sx_ * bhx, bcy + sy_ * bhy
+                loc.append((lx, ly, bcz + sz_ * bhz))
+            comp.append((bcx, bcy, bcz, bcz + bhz, bcz - bhz, bcx + bhx, bcx - bhx, bcy + bhy, tuple(loc), col, glow))
+        ent = (boxes, comp, {})
+        if persist:
+            if len(self._cbox) > 300:
+                self._cbox.clear()
+            self._cbox[key] = ent
+        return ent
+
+    def draw_boxes(self, org, Rv, Uv, Fv, boxes, shade, lod_fog=0, scale=1.0, tint=None, persist=False):
         """박스 목록을 (org, R/U/F 기저)에서 3D 로 그린다. 각 박스: 보이는 면만 칠함. scale = 크기 배율, tint = (색, 섞는 양)"""
         c = self.cam
         f, hx, hy, near = self.f, self.hx, self.hy, self.near
@@ -5772,52 +5998,80 @@ class Renderer(object):
             xr = -v[0] * ccy + v[2] * csy
             zr = v[0] * csy + v[2] * ccy
             return (xr * k, (v[1] * ccp + zr * csp) * k, (zr * ccp - v[1] * csp) * k)
-        O = cam_vec((ox, oy, oz))
-        Rc, Uc, Fc = cam_vec(Rv, scale), cam_vec(Uv, scale), cam_vec(Fv, scale)
+        O0, O1, O2 = cam_vec((ox, oy, oz))
+        R0, R1, R2 = cam_vec(Rv, scale)
+        U0, U1, U2 = cam_vec(Uv, scale)
+        F0, F1, F2 = cam_vec(Fv, scale)
         # 카메라의 로컬 좌표 (모델 단위)
         inv = 1.0 / scale
         clx = -(ox * Rv[0] + oy * Rv[1] + oz * Rv[2]) * inv
         cly = -(ox * Uv[0] + oy * Uv[1] + oz * Uv[2]) * inv
         clz = -(ox * Fv[0] + oy * Fv[1] + oz * Fv[2]) * inv
-        order = []
-        for bx in boxes:
-            dcen = O[2] + Rc[2] * bx[0] + Uc[2] * bx[1] + Fc[2] * bx[2]
-            order.append((dcen, bx))
-        order.sort(key=lambda t: -t[0])
-        surf = self.surf
-        rw, rh = self.rw, self.rh
-        for dcen, bx in order:
+        _b, comp, ccache = self._compiled(boxes, persist)
+        fcols = ccache.get(shade)
+        if fcols is None:
+            fcols = ccache[shade] = [((cb[9],) * 5 if cb[10] else tuple(shade_rgb(cb[9], k * shade) for k in _FACE_K)) for cb in comp]
+        order = [(O2 + R2 * cb[0] + U2 * cb[1] + F2 * cb[2], n) for n, cb in enumerate(comp)]
+        if len(order) > 1:
+            order.sort(key=_DP_KEY, reverse=True)
+        poly = self.poly
+        q2 = self._q2
+        LIM = 2400.0
+        for dcen, n in order:
             if dcen < -2.0:
                 continue
-            bcx, bcy, bcz, bhx, bhy, bhz, col, tx, ty, glow = bx
-            vis = {'z+': clz > bcz + bhz, 'z-': clz < bcz - bhz, 'x+': clx > bcx + bhx, 'x-': clx < bcx - bhx, 'y+': cly > bcy + bhy}
-            if not any(vis.values()):
+            cb = comp[n]
+            vzp = clz > cb[3]
+            vzm = clz < cb[4]
+            vxp = clx > cb[5]
+            vxm = clx < cb[6]
+            vyp = cly > cb[7]
+            if not (vzp or vzm or vxp or vxm or vyp):
                 continue
             corners = []
-            for idx in range(8):
-                sx_ = 1 if idx & 4 else -1
-                sy_ = 1 if idx & 2 else -1
-                sz_ = 1 if idx & 1 else -1
-                if sz_ > 0:
-                    lx, ly = bcx + sx_ * bhx * tx, bcy + sy_ * bhy * ty
-                else:
-                    lx, ly = bcx + sx_ * bhx, bcy + sy_ * bhy
-                lz = bcz + sz_ * bhz
-                xr = O[0] + Rc[0] * lx + Uc[0] * ly + Fc[0] * lz
-                yc = O[1] + Rc[1] * lx + Uc[1] * ly + Fc[1] * lz
-                dp = O[2] + Rc[2] * lx + Uc[2] * ly + Fc[2] * lz
+            p2 = []
+            ok = True
+            for (lx, ly, lz) in cb[8]:
+                xr = O0 + R0 * lx + U0 * ly + F0 * lz
+                yc = O1 + R1 * lx + U1 * ly + F1 * lz
+                dp = O2 + R2 * lx + U2 * ly + F2 * lz
                 if dp > near:
-                    inv = f / dp
-                    corners.append((hx + xr * inv, hy - yc * inv, dp, xr, yc))
+                    iv = f / dp
+                    sx = hx + xr * iv
+                    sy = hy - yc * iv
+                    corners.append((sx, sy, dp, xr, yc))
+                    p2.append((sx, sy))
+                    if ok and (sx > LIM or sx < -LIM or sy > LIM or sy < -LIM):
+                        ok = False
                 else:
                     corners.append((0.0, 0.0, dp, xr, yc))
-            for name, ids, k in FACES:
-                if not vis[name]:
-                    continue
-                cc = col if glow else shade_rgb(col, k * shade)
-                if tint is not None:
-                    cc = mix_rgb(cc, tint[0], tint[1])
-                self.poly(cc, [corners[i] for i in ids])
+                    p2.append((0.0, 0.0))
+                    ok = False
+            fc = fcols[n]
+            if tint is not None:
+                fc = tuple(mix_rgb(cc, tint[0], tint[1]) for cc in fc)
+            if ok:
+                if vzp:
+                    q2(fc[0], p2[1], p2[5], p2[7], p2[3])
+                if vzm:
+                    q2(fc[1], p2[4], p2[0], p2[2], p2[6])
+                if vxp:
+                    q2(fc[2], p2[4], p2[5], p2[7], p2[6])
+                if vxm:
+                    q2(fc[3], p2[1], p2[0], p2[2], p2[3])
+                if vyp:
+                    q2(fc[4], p2[2], p2[3], p2[7], p2[6])
+            else:
+                if vzp:
+                    poly(fc[0], [corners[1], corners[5], corners[7], corners[3]])
+                if vzm:
+                    poly(fc[1], [corners[4], corners[0], corners[2], corners[6]])
+                if vxp:
+                    poly(fc[2], [corners[4], corners[5], corners[7], corners[6]])
+                if vxm:
+                    poly(fc[3], [corners[1], corners[0], corners[2], corners[3]])
+                if vyp:
+                    poly(fc[4], [corners[2], corners[3], corners[7], corners[6]])
 
     def _draw_kart(self, rc, dp, lv):
         tg = self.tg
@@ -5900,7 +6154,7 @@ class Renderer(object):
         first, second = (wheels_front, wheels_back) if cl < 0 else (wheels_back, wheels_front)
         for w in first:
             self._draw_wheel(m, w, org, Rv, up, Fv, rc, lod0, amb, sc)
-        self.draw_boxes(org, Rv, up, Fv, boxes, amb, 0, sc, tint)
+        self.draw_boxes(org, Rv, up, Fv, boxes, amb, 0, sc, tint, True)
         # 드라이버 헬멧
         hp = m.helmet
         hxw = org[0] + (Rv[0] * hp[0] + up[0] * hp[1] + Fv[0] * hp[2]) * sc
@@ -5937,59 +6191,152 @@ class Renderer(object):
         lx, ly, lz = lx * sc, ly * sc, lz * sc
         R, ww = m.wheel_r * sc, m.wheel_w * sc
         if not lod0:
-            self.draw_boxes(org, Rv, Uv, Fv, [(lx, ly, lz, ww / 2, R, R, (26, 26, 30), 1, 1, False)], amb)
+            if sc == 1.0:
+                key = ('wb', id(m), lx, lz)
+                wb = self.models.get(key)
+                if wb is None:
+                    wb = self.models[key] = [(lx, ly, lz, ww / 2, R, R, (26, 26, 30), 1, 1, False)]
+                self.draw_boxes(org, Rv, Uv, Fv, wb, amb, persist=True)
+            else:
+                self.draw_boxes(org, Rv, Uv, Fv, [(lx, ly, lz, ww / 2, R, R, (26, 26, 30), 1, 1, False)], amb)
             return
         cam = self.cam
+        cx_, cy_, cz_ = cam.x, cam.y, cam.z
+        csy, ccy, csp, ccp = cam.sy, cam.cy, cam.sp, cam.cp
+        f, hx, hy, near = self.f, self.hx, self.hy, self.near
+        cos, sin = math.cos, math.sin
+
+        def P(x, y, z):
+            dx, dy, dz = x - cx_, y - cy_, z - cz_
+            xr = -dx * ccy + dz * csy
+            zr = dx * csy + dz * ccy
+            dp = zr * ccp - dy * csp
+            yc = dy * ccp + zr * csp
+            if dp > near:
+                inv = f / dp
+                return (hx + xr * inv, hy - yc * inv, dp, xr, yc)
+            return (0.0, 0.0, dp, xr, yc)
         # 바퀴 중심(월드)
         ctr = (org[0] + Rv[0] * lx + Uv[0] * ly + Fv[0] * lz, org[1] + Rv[1] * lx + Uv[1] * ly + Fv[1] * lz, org[2] + Rv[2] * lx + Uv[2] * ly + Fv[2] * lz)
         spin = self._wheel_phase(rc)
         steer = -rc.steer * 0.45 if front else 0.0
-        cs, sn = math.cos(steer), math.sin(steer)
+        cs, sn = cos(steer), sin(steer)
         # 앞바퀴 조향: 회전축(로컬 x)을 y축 둘레로 돌림
         ax = (Rv[0] * cs + Fv[0] * sn, Rv[1] * cs + Fv[1] * sn, Rv[2] * cs + Fv[2] * sn)
         fw = (Fv[0] * cs - Rv[0] * sn, Fv[1] * cs - Rv[1] * sn, Fv[2] * cs - Rv[2] * sn)
         hxw = ww / 2.0
-        ring = []
-        for k in range(6):
-            a = spin + k * math.pi / 3.0
-            ca, sa = math.cos(a) * R, math.sin(a) * R
-            ring.append((Uv[0] * ca + fw[0] * sa, Uv[1] * ca + fw[1] * sa, Uv[2] * ca + fw[2] * sa))
+        u0, u1, u2 = Uv
+        w0, w1, w2 = fw
+        axh0, axh1, axh2 = ax[0] * hxw, ax[1] * hxw, ax[2] * hxw
+        pa0, pa1, pa2 = ctr[0] + axh0, ctr[1] + axh1, ctr[2] + axh2
+        pb0, pb1, pb2 = ctr[0] - axh0, ctr[1] - axh1, ctr[2] - axh2
+        rw, rh = self.rw, self.rh
+        # 양쪽 캡의 육각형 꼭짓점 12개 (투영 계산을 그 자리에서 - 결과는 P() 와 같음)
         capA = []
         capB = []
-        for r_ in ring:
-            capA.append(self.proj(ctr[0] + ax[0] * hxw + r_[0], ctr[1] + ax[1] * hxw + r_[1], ctr[2] + ax[2] * hxw + r_[2]))
-            capB.append(self.proj(ctr[0] - ax[0] * hxw + r_[0], ctr[1] - ax[1] * hxw + r_[1], ctr[2] - ax[2] * hxw + r_[2]))
+        capA2 = []
+        capB2 = []
+        inside = True            # 12점 모두 카메라 앞 + 화면 안이면 poly() 의 검사 없이 바로 칠해도 같은 결과
+        for kk in _HEX_A:
+            a = spin + kk
+            ca, sa = cos(a) * R, sin(a) * R
+            r0, r1, r2 = u0 * ca + w0 * sa, u1 * ca + w1 * sa, u2 * ca + w2 * sa
+            # A 쪽 캡
+            dx, dy, dz = pa0 + r0 - cx_, pa1 + r1 - cy_, pa2 + r2 - cz_
+            xr = -dx * ccy + dz * csy
+            zr = dx * csy + dz * ccy
+            dp = zr * ccp - dy * csp
+            yc = dy * ccp + zr * csp
+            if dp > near:
+                inv = f / dp
+                sx = hx + xr * inv
+                sy = hy - yc * inv
+                capA.append((sx, sy, dp, xr, yc))
+                capA2.append((sx, sy))
+                if inside and (sx < 0.0 or sx > rw or sy < 0.0 or sy > rh):
+                    inside = False
+            else:
+                capA.append((0.0, 0.0, dp, xr, yc))
+                capA2.append((0.0, 0.0))
+                inside = False
+            # B 쪽 캡
+            dx, dy, dz = pb0 + r0 - cx_, pb1 + r1 - cy_, pb2 + r2 - cz_
+            xr = -dx * ccy + dz * csy
+            zr = dx * csy + dz * ccy
+            dp = zr * ccp - dy * csp
+            yc = dy * ccp + zr * csp
+            if dp > near:
+                inv = f / dp
+                sx = hx + xr * inv
+                sy = hy - yc * inv
+                capB.append((sx, sy, dp, xr, yc))
+                capB2.append((sx, sy))
+                if inside and (sx < 0.0 or sx > rw or sy < 0.0 or sy > rh):
+                    inside = False
+            else:
+                capB.append((0.0, 0.0, dp, xr, yc))
+                capB2.append((0.0, 0.0))
+                inside = False
         # 카메라가 어느 캡 쪽에 있나
-        v = (cam.x - ctr[0], cam.y - ctr[1], cam.z - ctr[2])
-        side = v[0] * ax[0] + v[1] * ax[1] + v[2] * ax[2]
-        tire = shade_rgb((34, 34, 40), amb)
+        v0, v1, v2 = cx_ - ctr[0], cy_ - ctr[1], cz_ - ctr[2]
+        side = v0 * ax[0] + v1 * ax[1] + v2 * ax[2]
+        tire = self._tire_col.get(amb)
+        if tire is None:
+            tire = self._tire_col[amb] = shade_rgb((34, 34, 40), amb)
+        poly = self.poly
+        surf = self.surf
+        lim = R * 0.866
         # 접지면(트레드) 먼저
         for k in range(6):
-            a = spin + (k + 0.5) * math.pi / 3.0
-            nx = Uv[0] * math.cos(a) + fw[0] * math.sin(a)
-            ny = Uv[1] * math.cos(a) + fw[1] * math.sin(a)
-            nz = Uv[2] * math.cos(a) + fw[2] * math.sin(a)
-            if (v[0] * nx + v[1] * ny + v[2] * nz) > R * 0.866:
-                shade = 0.7 + 0.3 * (0.5 + 0.5 * math.sin(a * 1.0))
+            a = spin + _HEX_B[k]
+            ca, sa = cos(a), sin(a)
+            nx = u0 * ca + w0 * sa
+            ny = u1 * ca + w1 * sa
+            nz = u2 * ca + w2 * sa
+            if (v0 * nx + v1 * ny + v2 * nz) > lim:
+                shade = 0.7 + 0.3 * (0.5 + 0.5 * sin(a * 1.0))
                 k2 = (k + 1) % 6
-                self.poly(shade_rgb(tire, shade * (1.0 + (0.15 if k % 2 else 0.0))), (capA[k], capA[k2], capB[k2], capB[k]))
+                col = shade_rgb(tire, shade * (1.0 + (0.15 if k % 2 else 0.0)))
+                if inside:
+                    _draw_polygon(surf, col, (capA2[k], capA2[k2], capB2[k2], capB2[k]))
+                else:
+                    poly(col, (capA[k], capA[k2], capB[k2], capB[k]))
         if abs(side) > hxw:
             cap = capA if side > 0 else capB
             rim = m.rim_color
-            self.poly(shade_rgb((26, 26, 30), amb), cap)
+            ck = (amb, rim, m.rim)
+            cols = self._tire_col.get(ck)
+            if cols is None:
+                if len(self._tire_col) > 4000:
+                    self._tire_col.clear()
+                cols = self._tire_col[ck] = (shade_rgb((26, 26, 30), amb), rim if m.rim in (3, 4) else shade_rgb(rim, amb))
+            if inside:
+                _draw_polygon(surf, cols[0], capA2 if side > 0 else capB2)
+            else:
+                poly(cols[0], cap)
             # 림(안쪽 6각형)
-            ctrp = self.proj(ctr[0] + ax[0] * (hxw + 0.01) * (1 if side > 0 else -1), ctr[1] + ax[1] * (hxw + 0.01) * (1 if side > 0 else -1), ctr[2] + ax[2] * (hxw + 0.01) * (1 if side > 0 else -1))
-            if ctrp[2] > self.near:
-                inner = []
-                for p_ in cap:
-                    inner.append((ctrp[0] + (p_[0] - ctrp[0]) * 0.68, ctrp[1] + (p_[1] - ctrp[1]) * 0.68, p_[2], p_[3], p_[4]))
-                self.poly(rim if m.rim in (3, 4) else shade_rgb(rim, amb), inner)
+            sg = 1 if side > 0 else -1
+            ctrp = P(ctr[0] + ax[0] * (hxw + 0.01) * sg, ctr[1] + ax[1] * (hxw + 0.01) * sg, ctr[2] + ax[2] * (hxw + 0.01) * sg)
+            if ctrp[2] > near:
+                c0, c1 = ctrp[0], ctrp[1]
+                # 중심점도 화면 안이면 안쪽 점들은 중심~꼭짓점 사이라 모두 화면 안 -> 검사 없이 칠해도 poly() 와 같은 결과
+                fast = inside and 0.0 <= c0 <= rw and 0.0 <= c1 <= rh
+                if fast:
+                    inner = [(c0 + (p_[0] - c0) * 0.68, c1 + (p_[1] - c1) * 0.68) for p_ in cap]
+                    _draw_polygon(surf, cols[1], inner)
+                else:
+                    inner = []
+                    for p_ in cap:
+                        inner.append((ctrp[0] + (p_[0] - ctrp[0]) * 0.68, ctrp[1] + (p_[1] - ctrp[1]) * 0.68, p_[2], p_[3], p_[4]))
+                    poly(cols[1], inner)
                 if m.rim in (1, 2):
                     for k in range(0, 6, 1 if m.rim == 2 else 2):
-                        pygame.draw.line(self.surf, (30, 30, 36), (ctrp[0], ctrp[1]), (inner[k][0], inner[k][1]), 1)
+                        pygame.draw.line(surf, (30, 30, 36), (c0, c1), (inner[k][0], inner[k][1]), 1)
+                elif fast:
+                    _draw_polygon(surf, (40, 40, 48), [(c0 + (p_[0] - c0) * 0.28, c1 + (p_[1] - c1) * 0.28) for p_ in cap])
                 else:
                     hub = [(ctrp[0] + (p_[0] - ctrp[0]) * 0.28, ctrp[1] + (p_[1] - ctrp[1]) * 0.28, p_[2], p_[3], p_[4]) for p_ in cap]
-                    self.poly((40, 40, 48), hub)
+                    poly((40, 40, 48), hub)
 
     def _wheel_phase(self, rc):
         return (rc.total * self.track.ds / 0.4) % TAU if self.track is not None else 0.0
@@ -6125,7 +6472,7 @@ class Renderer(object):
         if icon in ('missile', 'arrow', 'drone', 'bird', 'shuriken', 'boomerang'):
             ang = (t * 20.0) if icon in ('shuriken', 'boomerang') else e.h
             Rv, Uv, Fv = self._yaw_basis(ang)
-            self.draw_boxes((e.x, e.y, e.z), Rv, Uv, Fv, self._ent_boxes(it), 1.0)
+            self.draw_boxes((e.x, e.y, e.z), Rv, Uv, Fv, self._ent_boxes(it), 1.0, persist=True)
             return
         if icon == 'bee':
             for i in range(5):
@@ -6179,7 +6526,10 @@ class Renderer(object):
             self._cube_box(e.x, e.gy + 0.85, e.z, -t * 1.8 + e.h, 0.8, hue_rgb(t * 0.25 + 0.5), dp)
         elif shape == 'wall':
             Rv, Uv, Fv = self._yaw_basis(e.h)
-            self.draw_boxes((e.x, e.gy, e.z), Rv, Uv, Fv, wall_boxes(it), 1.0)
+            wb = self.models.get(('wb', it['id']))
+            if wb is None:
+                wb = self.models[('wb', it['id'])] = wall_boxes(it)
+            self.draw_boxes((e.x, e.gy, e.z), Rv, Uv, Fv, wb, 1.0, persist=True)
         elif shape == 'portal':
             ch, sh_ = math.cos(e.h), math.sin(e.h)
             pts = []
@@ -6418,7 +6768,7 @@ class UI(object):
         key = (text, int(size), color)
         s = self.cache.get(key)
         if s is None:
-            if len(self.cache) > 500:
+            if len(self.cache) > 900:
                 self.cache.clear()
             s = self.cache[key] = self.font(size).render(text, True, color)
         return s
@@ -7165,7 +7515,6 @@ class App(object):
         self.scan = {'busy': False, 'rooms': [], 'done': False}
         self.err = ''
         self.sel_map = int(self.profile['map'])
-        self.slow_t = 0.0
         self.fps_ema = 60.0
         self.show_fps = bool(args.get('fps'))
         self.finish_at = None
@@ -7564,16 +7913,8 @@ class App(object):
         self.draw_labels()
         if not self.paused:
             self.sfx.engine(clamp(ratio, 0, 1.3), 1.0 if inp['throttle'] > 0 else 0.2, loc.boosting, loc.drifting, loc.offroad)
-        # 성능 자동 조절
+        # 프레임 측정 (표시용 - 화질/해상도는 절대 자동으로 낮추지 않는다)
         self.fps_ema += (1.0 / max(dt, 1e-3) - self.fps_ema) * 0.05
-        if self.fps_ema < 24 and self.renderer.q > 0 and race.phase == 'run':
-            self.slow_t += dt
-            if self.slow_t > 3.0:
-                self.slow_t = 0.0
-                self.set_quality(self.renderer.q - 1)
-                self.toast(T('프레임 향상을 위해 그래픽 품질을 낮췄어요', 'Lowered graphics for smoother play'), 2.5, (255, 255, 255))
-        else:
-            self.slow_t = 0.0
 
     def draw_labels(self):
         rd = self.renderer

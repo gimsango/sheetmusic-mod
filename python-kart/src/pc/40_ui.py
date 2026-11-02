@@ -54,17 +54,26 @@ class Bar(object):
         self.fill.setPos(x, 0, z)
         self.w, self.h = w, h
         self.fill.setColor(*color)
+        self._v = None              # 마지막으로 넣은 값/색/표시 상태 (같으면 다시 넣지 않음)
+        self._col = tuple(color)
+        self._shown = True
         self.set(0.0)
 
     def set(self, v, color=None):
         v = clamp(v, 0.0, 1.0)
-        self.fill.setScale(max(0.0001, self.w * v), 1, self.h)
-        if color:
+        if v != self._v:
+            self._v = v
+            self.fill.setScale(max(0.0001, self.w * v), 1, self.h)
+        if color and color != self._col:
+            self._col = color
             self.fill.setColor(*color)
 
     def show(self, flag=True):
-        for n in (self.back, self.fill):
-            n.show() if flag else n.hide()
+        flag = bool(flag)
+        if flag != self._shown:
+            self._shown = flag
+            for n in (self.back, self.fill):
+                n.show() if flag else n.hide()
 
 
 class HUD(object):
@@ -137,6 +146,7 @@ class HUD(object):
             d = self.mini_np.attachNewNode(cmd.generate())
             d.hide()
             self.dots.append(d)
+        self._dot_st = [None] * len(self.dots)
 
     def mm_xy(self, x, z):
         s = 0.5 / self.mm_span
@@ -192,15 +202,21 @@ class HUD(object):
         self._set(self.wrong, T('역주행!', 'WRONG WAY!') if (sim.wrong_way and race.phase == 'run' and not loc.finished) else '')
         # 미니맵
         if self.mini_np is not None:
+            st = self._dot_st
+            nr = len(race.racers)
             for i, d in enumerate(self.dots):
-                if i < len(race.racers):
+                if i < nr:
                     rc = race.racers[i]
                     x, z = self.mm_xy(rc.x, rc.z)
                     d.setPos(x, 0, z)
-                    d.setColor(*((1, 0.69, 0.13, 1) if rc is loc else ((1, 0.43, 0.43, 1) if rc.kind == 'bot' else (0.35, 0.9, 1, 1))))
-                    d.setScale(1.7 if rc is loc else 1.0)
-                    d.show()
-                else:
+                    look = (rc is loc, rc.kind)
+                    if st[i] != look:                # 색/크기/표시는 바뀔 때만
+                        st[i] = look
+                        d.setColor(*((1, 0.69, 0.13, 1) if rc is loc else ((1, 0.43, 0.43, 1) if rc.kind == 'bot' else (0.35, 0.9, 1, 1))))
+                        d.setScale(1.7 if rc is loc else 1.0)
+                        d.show()
+                elif st[i] is not False:
+                    st[i] = False
                     d.hide()
 
     def say(self, text, secs=1.2, big=False, color=(1, 0.8, 0.27, 1)):
