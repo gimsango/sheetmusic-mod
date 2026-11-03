@@ -144,11 +144,6 @@ class PCMapMaker(object):
             n.setLightOff()
             n.setTransparency(TransparencyAttrib.MAlpha)
         self.need_cv = self.need_ui = True
-        if not self.events:
-            for ev, fn in (('mouse1', self.on_down), ('mouse1-up', self.on_up), ('mouse3', self.on_rdown), ('mouse3-up', self.on_rup),
-                           ('wheel_up', lambda: self.on_wheel(1)), ('wheel_down', lambda: self.on_wheel(-1))):
-                app.accept(ev, fn)
-            self.events = True
         if self.view is None:
             self.fit()
 
@@ -158,10 +153,6 @@ class PCMapMaker(object):
         self.root = self.cv_np = self.ov_np = self.ui_np = None
         self.buttons = []
         self.texts = {}
-        if self.events:
-            for ev in ('mouse1', 'mouse1-up', 'mouse3', 'mouse3-up', 'wheel_up', 'wheel_down'):
-                self.app.ignore(ev)
-            self.events = False
 
     def save(self):
         d = self.ed.result()

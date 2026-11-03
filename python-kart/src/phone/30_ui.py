@@ -215,10 +215,11 @@ class UI(object):
         surf.blit(s, (r.centerx - s.get_width() // 2, r.centery - s.get_height() // 2))
         return enabled and self.tapped(rect)
 
-    def stepper(self, surf, rect, label, value, lo=None, hi=None):
-        """[라벨      ◀  값  ▶]  -> -1 / 0 / +1"""
+    def stepper(self, surf, rect, label, value, lo=None, hi=None, shown=None):
+        """[라벨      ◀  값  ▶]  -> -1 / 0 / +1   (shown: 값 대신 보여줄 글자, 예: '80%')"""
         u = self.u
-        self.text(surf, label, rect.x, rect.centery - 11 * u, 22 * u, (210, 220, 245))
+        ls = min(22 * u, rect.h * 0.62)
+        self.text(surf, label, rect.x, rect.centery - ls * 0.5, ls, (210, 220, 245))
         bw = rect.h
         res = 0
         lb = pygame.Rect(rect.right - bw * 3.4, rect.y, bw, rect.h)
@@ -227,7 +228,13 @@ class UI(object):
             res = -1
         if self.button(surf, rb, '>', 'normal', enabled=(hi is None or value < hi)):
             res = 1
-        self.text(surf, str(value), (lb.right + rb.x) // 2, rect.centery - 13 * u, 26 * u, (255, 220, 120), 'c')
+        txt = str(value) if shown is None else shown
+        vs = min(26 * u, rect.h * 0.7)
+        room = rb.x - lb.right - 6
+        tw = self.render(txt, vs, (255, 220, 120)).get_width()
+        if tw > room > 0:
+            vs = vs * room / float(tw)            # 칸보다 길면 글자를 줄인다
+        self.text(surf, txt, (lb.right + rb.x) // 2, rect.centery - vs * 0.5, vs, (255, 220, 120), 'c')
         return res
 
 

@@ -15,9 +15,28 @@ def frames(n, dt=1 / 30.0):
     g.dt_override = dt
     for _ in range(n): g.taskMgr.step()
 frames(3)
-for scene in ('menu', 'solo', 'garage', 'settings', 'multi', 'lobby', 'race', 'maps', 'editor', 'custom_solo', 'custom_race', 'lobby_custom'):
+for scene in ('menu', 'solo', 'garage', 'settings', 'set_gfx', 'set_display', 'set_audio', 'set_controls', 'set_game', 'about', 'multi', 'lobby',
+              'race', 'pause_settings', 'time_attack', 'time_results', 'maps', 'editor', 'custom_solo', 'custom_race', 'lobby_custom'):
     try:
-        if scene == 'lobby':
+        if scene.startswith('set_'):
+            g.go('menu'); g.open_settings(scene[4:])
+        elif scene == 'pause_settings':
+            g.session.leave(); g.profile['map_src'] = 'builtin'; g.profile['mode'] = 'speed'; g.profile['bots'] = 2; g.start_solo()
+            g.race.start_at = time.monotonic() + 0.2; frames(2); g.toggle_pause(); g.open_settings('main', True)
+        elif scene == 'time_attack':
+            g.session.leave(); g.profile['map_src'] = 'builtin'; g.profile['mode'] = 'time'; g.profile['laps'] = 1; g.start_solo()
+            g.race.start_at = time.monotonic() + 0.2; g.race.auto_local = True
+        elif scene == 'time_results':
+            if g.race is None or g.scene != 'race':          # 앞 장면에서 무작위 입력으로 나갔으면 새로 시작
+                g.profile['map_src'] = 'builtin'; g.profile['mode'] = 'time'; g.profile['laps'] = 1; g.start_solo()
+                g.race.start_at = time.monotonic() + 0.2
+            if g.paused: g.toggle_pause()
+            g.race.auto_local = True
+            for _ in range(2400):
+                g.dt_override = 1 / 30.0; g.taskMgr.step()
+                if g.scene == 'results': break
+            print('time attack reached', g.scene, 'laps', g.race.lap_times if g.race else None)
+        elif scene == 'lobby':
             g.session.leave(); g.session.host_game(5631); g.go('lobby')
         elif scene == 'editor':
             g.maker.open(K.cmap_new('fuzz', rnd.randint(1, 1000)), None)
@@ -54,10 +73,16 @@ for scene in ('menu', 'solo', 'garage', 'settings', 'multi', 'lobby', 'race', 'm
                 g._keystroke(rnd.choice('0123456789abc.:'))
             if g.scene == 'menu' and rnd.random() < 0.05:
                 g.go(rnd.choice(['solo', 'garage', 'settings', 'multi']))
+            if g.scene not in ('editor', 'race') and rnd.random() < 0.15:         # 마우스로 메뉴 조작
+                a = g.getAspectRatio()
+                pos = (rnd.uniform(-a, a), rnd.uniform(-1, 1))
+                g.last_mouse = pos
+                g.menu.hover(pos)
+                g.menu.mouse(rnd.choice(['l', 'l', 'r', 'wu', 'wd']), pos)
             frames(1)
         g.keys.clear()
         if g.input.active: g.input.finish(False)
-        if g.race: g.leave_race(); frames(2)
+        if g.race and scene != 'time_attack': g.leave_race(); frames(2)
         if g.scene == 'editor' and g.maker.ed is not None:
             g.maker.save(); g.maker.leave(); frames(2)
     except Exception:

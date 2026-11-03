@@ -12,8 +12,9 @@ import time
 import os
 import sys
 import queue
+import array
 
-VERSION = '1.1'
+VERSION = '1.2'
 MAP_COUNT = 1000
 KART_COUNT = 100000
 DEFAULT_PORT = 5555

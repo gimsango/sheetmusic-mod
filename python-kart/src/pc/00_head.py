@@ -29,6 +29,12 @@ import tempfile
 import subprocess
 import random as _random
 
+for _st in (sys.stdout, sys.stderr):      # 콘솔이 한글을 못 쓰는 환경(ASCII)에서도 글자 출력 때문에 멈추지 않게
+    try:
+        _st.reconfigure(errors='backslashreplace')
+    except Exception:
+        pass
+
 
 def _is_android():
     return ('ANDROID_ARGUMENT' in os.environ) or ('ANDROID_ROOT' in os.environ and os.path.exists('/system/build.prop'))
@@ -43,6 +49,16 @@ def _wait_key():
         pass
 
 
+def _error_box(text):
+    """콘솔 없는 설치판(윈도우)에서 오류를 창으로 보여준다"""
+    if getattr(sys, 'frozen', False) and sys.platform.startswith('win'):
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, text, 'TURBO KART 3D', 0x10)
+        except Exception:
+            pass
+
+
 def _crash_log(text):
     """오류 내용을 화면 + kart3d_error.txt 파일로 남긴다 (파일은 게임 파일과 같은 폴더)"""
     info = 'Python %s | %s | %s' % (sys.version.split()[0], sys.platform, sys.executable)
@@ -50,7 +66,14 @@ def _crash_log(text):
         base = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] else '.'
     except Exception:
         base = '.'
-    for d in (base, os.path.expanduser('~'), '.'):
+    dirs = [base, os.path.expanduser('~'), '.']
+    try:
+        sd = globals().get('save_dirs')            # 설치판이면 사용자 폴더가 먼저 (프로그램 폴더는 쓰기 금지일 수 있음)
+        if sd is not None:
+            dirs = [d or '.' for d in sd()] + dirs
+    except Exception:
+        pass
+    for d in dirs:
         try:
             path = os.path.join(d, 'kart3d_error.txt')
             with open(path, 'a', encoding='utf-8') as f:

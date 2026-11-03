@@ -102,12 +102,16 @@ class KartModel(object):
         self.spin = 0.0
 
 
+CAM_K = [0.82, 1.0, 1.22]          # 카메라 거리 설정 (가까이 / 보통 / 멀리)
+
+
 class ChaseCam(object):
     """추격 카메라: 카트 뒤쪽 위에서 부드럽게 따라간다"""
 
     def __init__(self):
         self.h = None
         self.y = 0.0
+        self.k = 1.0           # 카메라 거리 배율 (설정: 가까이 0.82 / 보통 1 / 멀리 1.22)
 
     def reset(self):
         self.h = None
@@ -120,8 +124,8 @@ class ChaseCam(object):
             self.y = rc.y
         self.h += wrap_pi(target - self.h) * (1 - math.exp(-7.0 * dt))
         self.y += (rc.y - self.y) * (1 - math.exp(-9.0 * dt))
-        dist = 8.3 + sr * 2.2 + (1.6 if rc.boosting else 0.0)
-        hgt = 3.5 + sr * 0.4
+        dist = (8.3 + sr * 2.2 + (1.6 if rc.boosting else 0.0)) * self.k
+        hgt = (3.5 + sr * 0.4) * (0.6 + 0.4 * self.k)
         fx, fz = math.sin(self.h), math.cos(self.h)
         x, y, z = rc.x - fx * dist, self.y + hgt, rc.z - fz * dist
         lx, ly, lz = rc.x + fx * 8.0, self.y + 1.2, rc.z + fz * 8.0

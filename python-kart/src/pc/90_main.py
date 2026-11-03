@@ -57,6 +57,7 @@ def main():
         if path:
             print('(같은 내용이 파일로도 저장되었습니다 / also saved to: %s)' % path)
         print('=' * 64)
+        _error_box(u'오류가 발생했습니다 / An error occurred.\n\n%s\n\n%s' % (path or '', text[-900:]))
         _wait_key()
         raise SystemExit(1)
     finally:

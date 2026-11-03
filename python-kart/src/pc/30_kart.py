@@ -79,6 +79,8 @@ class KartNode(object):
         sh.setLightOff()
         sh.setDepthWrite(False)
         sh.setBin('fixed', 2)
+        if not GFX.get('shadows', True):
+            sh.hide()
         self.shadow = sh
         # 부스트 불꽃
         fm = Mesh()
@@ -234,6 +236,7 @@ class KartNode(object):
 
 class Particles(object):
     def __init__(self, app, n=150):
+        n = max(40, int(n * GFX.get('fx_k', 1.0)))
         self.app = app
         self.items = []
         cm = CardMaker('p')
@@ -297,7 +300,7 @@ class Weather(object):
         spec = WEATHER.get(kind, ((255, 255, 255), 3.0, 1.0, 2))
         self.vy = -spec[1]
         self.drift = spec[2]
-        self.n = {'snow': 520, 'rain': 700, 'firefly': 160, 'sparkle': 110, 'dust': 260}.get(kind, 320)
+        self.n = max(20, int({'snow': 520, 'rain': 700, 'firefly': 160, 'sparkle': 110, 'dust': 260}.get(kind, 320) * GFX.get('weather_k', 1.0)))
         self.lines = kind == 'rain'
         fmt = GeomVertexFormat.getV3()
         self.vd = GeomVertexData('weather', fmt, Geom.UHDynamic)

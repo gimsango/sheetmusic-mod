@@ -6,6 +6,12 @@ def PV(x, y, z):
     return (x, -z, y)
 
 
+# 그래픽 설정 (설정 메뉴가 바꾸고, 월드/카트/효과를 만들 때 읽는다)
+#   aniso 텍스처 필터, props_k 장식물 밀도, fx_k 파티클 수, weather_k 날씨 입자 수, shadows 카트 그림자,
+#   cull_m 이 거리(m)보다 먼 장식물 묶음은 숨김(0 = 안 숨김), fog_k 안개 배율(<1 이면 더 멀리 보임)
+GFX = dict(aniso=8, props_k=1.0, fx_k=1.0, weather_k=1.0, shadows=True, cull_m=0.0, fog_k=1.0)
+
+
 def rgbf(c, k=1.0, a=1.0):
     return (min(1.0, c[0] / 255.0 * k), min(1.0, c[1] / 255.0 * k), min(1.0, c[2] / 255.0 * k), a)
 
@@ -238,7 +244,7 @@ def make_texture(name, w, h, data, fmt='RGB', repeat=True):
     t.setMinfilter(Texture.FT_linear_mipmap_linear)
     t.setMagfilter(Texture.FT_linear)
     try:
-        t.setAnisotropicDegree(4)
+        t.setAnisotropicDegree(int(GFX.get('aniso', 4)))
     except Exception:
         pass
     return t

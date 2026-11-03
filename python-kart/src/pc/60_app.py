@@ -9,24 +9,75 @@ def wrap_map(m):
 ITEM_KEYS_PC = {'1': 0, '2': 1, '3': 2, 'face_x': 0, 'face_y': 1, 'face_b': 2}
 
 
-class Game(ShowBase):
+def _icon_px(u, v):
+    """아이콘 한 점의 색 (u, v = 0~1): 어두운 둥근 사각형 + 주황 원 + 체크무늬 깃발 + 속도선"""
+    du, dv = abs(u - 0.5), abs(v - 0.5)
+    cr = 0.2
+    if du > 0.5 - cr and dv > 0.5 - cr and math.hypot(du - (0.5 - cr), dv - (0.5 - cr)) > cr:
+        return None
+    col = (0.06 + 0.1 * v, 0.07 + 0.03 * v, 0.2 + 0.12 * v)
+    d = math.hypot(u - 0.5, v - 0.47)
+    if d < 0.38:
+        k = 1.0 - d / 0.38
+        col = (1.0, 0.42 + 0.3 * k, 0.08 + 0.1 * k)
+    if 0.24 < u < 0.76:
+        fv = v - 0.035 * math.sin((u - 0.24) * 2 * math.pi)        # 바람에 펄럭이는 깃발
+        if 0.27 < fv < 0.6:
+            cx, cy = int((u - 0.24) / 0.0867), int((fv - 0.27) / 0.0825)
+            c = 0.97 if (cx + cy) % 2 == 0 else 0.07
+            col = (c, c, c)
+    if 0.2 < u < 0.235 and 0.25 < v < 0.84:                      # 깃대
+        col = (0.85, 0.87, 0.95)
+    for i, (y0, x0) in enumerate(((0.7, 0.36), (0.76, 0.44), (0.82, 0.52))):
+        if abs(v - y0) < 0.014 and x0 < u < 0.82:                # 속도선
+            col = (1.0, 0.95, 0.85)
+    return col
+
+
+def draw_icon(n=64, ss=2):
+    """게임 아이콘 그림 (창 아이콘 + 배포용 아이콘 공용). ss = 한 칸을 몇 번 나눠 찍어 테두리를 부드럽게"""
+    from panda3d.core import PNMImage
+    img = PNMImage(n, n, 4)
+    img.fill(0, 0, 0)
+    img.alphaFill(0)
+    inv = 1.0 / (n * ss)
+    for y in range(n):
+        for x in range(n):
+            r = g = b = a = 0.0
+            for sy in range(ss):
+                for sx in range(ss):
+                    c = _icon_px((x * ss + sx + 0.5) * inv, (y * ss + sy + 0.5) * inv)
+                    if c is not None:
+                        r += c[0]
+                        g += c[1]
+                        b += c[2]
+                        a += 1.0
+            if a > 0:
+                img.setXelA(x, y, r / a, g / a, b / a, a / (ss * ss))
+    return img
+
+
+class Game(ShowBase, SettingsMixin):
     def __init__(self, args):
         global LANG
         self.args = args
         offscreen = bool(os.environ.get('KART3D_OFFSCREEN')) or bool(args.get('offscreen'))
-        w, h = args.get('window', (1280, 720))
-        cfg = ['window-title TURBO KART 3D', 'win-size %d %d' % (w, h), 'sync-video 1', 'framebuffer-multisample 1', 'multisamples 4']
-        if args.get('fullscreen'):
-            cfg.append('fullscreen 1')
+        self.profile = Profile()
+        gfx_sync(self.profile)
+        cfg = ['window-title TURBO KART 3D'] + startup_cfg(self.profile, args)
         if offscreen:
             cfg += ['window-type offscreen', 'load-display p3tinydisplay', 'audio-library-name null']
+        else:
+            cfg += ['aux-display p3tinydisplay']     # OpenGL 창을 못 열면 소프트웨어 렌더러로라도 실행
         loadPrcFileData('', '\n'.join(cfg))
         ShowBase.__init__(self)
         self.offscreen = offscreen
+        self.start_msaa = int(self.profile['msaa'])
+        self.start_vsync = bool(self.profile['vsync'])
         self.disableMouse()
-        self.render.setAntialias(AntialiasAttrib.MAuto)
+        self.render.setAntialias(AntialiasAttrib.MAuto if self.start_msaa > 0 else AntialiasAttrib.MNone)
         self.camLens.setNearFar(0.4, 6000.0)
-        self.profile = Profile()
+        self.set_window_icon()
         if args.get('port'):
             self.profile['port'] = args['port']
         path = find_korean_font()
@@ -100,8 +151,15 @@ class Game(ShowBase):
             self.accept(k + '-up', self._kup, [k])
             self.accept(k + '-repeat', self._krep, [k])
         self.accept('keystroke', self._keystroke)
+        for ev, kind in (('mouse1', 'l'), ('mouse1-up', 'lu'), ('mouse3', 'r'), ('mouse3-up', 'ru'), ('wheel_up', 'wu'), ('wheel_down', 'wd')):
+            self.accept(ev, self.on_mouse, [kind])
+        self.last_mouse = None
+        self.apply_runtime()
+        if self.profile['display'] == 'borderless':
+            self.apply_display()
         self.taskMgr.add(self.tick, 'tick')
         self.go('menu')
+        self.audio.music('menu', 0)
 
     # ------------------------------------------------------------------ 입력 처리
     def _kdown(self, k):
@@ -152,7 +210,10 @@ class Game(ShowBase):
             elif k == 'r' and self.race:
                 self.race.respawn_local()
             elif k == 'escape':
-                self.toggle_pause()
+                if self.paused and getattr(self, 'settings_from_pause', False):
+                    self.settings_back()
+                else:
+                    self.toggle_pause()
             elif k == 'm':
                 self.audio.enabled = not self.audio.enabled
                 self.hud.say(T('소리 켬', 'Sound on') if self.audio.enabled else T('소리 끔', 'Sound off'), 0.8)
@@ -180,13 +241,17 @@ class Game(ShowBase):
         sc = self.scene
         if sc == 'menu':
             self.userExit()
-        elif sc in ('solo', 'garage', 'settings', 'multi', 'maps'):
+        elif sc == 'settings':
+            self.settings_back()
+        elif sc in ('solo', 'garage', 'multi', 'maps'):
             self.profile.save()
             self.go('menu')
         elif sc == 'mapitem':
             self.go('maps')
         elif sc == 'editor':
             self.maker.try_exit()
+        elif sc == 'about':
+            self.go('menu')
         elif sc == 'lobby':
             self.session.leave()
             self.go('menu')
@@ -286,6 +351,8 @@ class Game(ShowBase):
         self.scene = scene
         self.err = ''
         self.menu.clear_extra()
+        if scene not in ('race', 'results'):
+            self.audio.music('menu', 0)
         if scene != 'editor':
             self.maker.leave_ui()
         if scene != 'race':
@@ -301,7 +368,12 @@ class Game(ShowBase):
         elif scene == 'garage':
             self.build_garage()
         elif scene == 'settings':
+            if getattr(self, 'set_page', None) is None or not getattr(self, '_settings_keep', False):
+                self.set_page = 'main'
+            self._settings_keep = False
             self.build_settings()
+        elif scene == 'about':
+            self.build_about()
         elif scene == 'multi':
             self.scan_rooms()
             self.build_multi()
@@ -320,12 +392,67 @@ class Game(ShowBase):
                 self.R(T('WiFi 멀티플레이', 'WiFi multiplayer'), lambda: self.go('multi'), kind='primary', id='multi'),
                 self.R(T('맵 만들기 (내 맵 %d개)' % len(self.store.maps), 'Map maker (%d maps)' % len(self.store.maps)), lambda: self.go('maps'), id='maps'),
                 self.R(T('차고 (카트 꾸미기)', 'Garage (customize)'), lambda: self.go('garage'), id='garage'),
-                self.R(T('설정', 'Settings'), lambda: self.go('settings'), id='settings'),
+                self.R(T('설정 (그래픽 · 화면 · 소리 · 조작)', 'Settings (graphics · display · audio · controls)'), lambda: self.open_settings(), id='settings'),
+                self.R(T('게임 정보', 'About'), lambda: self.go('about'), id='about'),
                 self.R(T('종료', 'Quit'), self.userExit, id='quit')]
         if self.err:
             rows.append(self.I(self.err, (1, 0.5, 0.5, 1)))
         rows.append(self.I('%s  #%d' % (kart_name(self.profile['kart'], LANG), int(self.profile['kart']) + 1), scale=0.045))
-        self.menu.set('TURBO KART 3D', rows, T('맵·바이옴 1000종 · 카트 100,000종 · 아이템 100종 · WiFi 멀티', '1000 maps & biomes · 100,000 karts · 100 items · WiFi multiplayer'), T('↑↓ 선택   Enter 확인   F11 전체화면', 'Up/Down select   Enter OK   F11 fullscreen'))
+        self.menu.set('TURBO KART 3D', rows, T('맵·바이옴 1000종 · 카트 100,000종 · 아이템 100종 · 맵 만들기 · WiFi 멀티', '1000 maps & biomes · 100,000 karts · 100 items · map maker · WiFi multiplayer'),
+                      T('마우스 또는 ↑↓ Enter   ·   F11 전체 화면', 'Mouse or arrows + Enter   ·   F11 fullscreen'))
+
+    def build_about(self):
+        rows = [self.I('TURBO KART 3D  v%s' % VERSION, (1, 0.69, 0.13, 1), 0.07),
+                self.I(T('맵·바이옴 1000종 · 카트 100,000종 · 아이템 100종 · 맵 만들기 · 최대 12명 WiFi 멀티 (폰↔PC)',
+                         '1000 maps & biomes · 100,000 karts · 100 items · map maker · up to 12 players over WiFi (phone↔PC)'), scale=0.045),
+                self.I(T('엔진: Panda3D (PC) · pygame (폰)    음악·효과음: 게임 안에서 코드로 합성', 'Engine: Panda3D (PC) · pygame (phone)    Music & SFX: synthesized in code'), scale=0.045),
+                self.I(T('저장 파일: kart3d_profile.json (설정·기록) · kart3d_maps.json (내 맵)', 'Save files: kart3d_profile.json (settings, records) · kart3d_maps.json (my maps)'), scale=0.045),
+                self.I(T('기록이 있는 맵: %d개' % len(self.profile['records']), 'Maps with records: %d' % len(self.profile['records'])) if isinstance(self.profile['records'], dict) else '', scale=0.045),
+                self.R(T('뒤로', 'Back'), lambda: self.go('menu'), id='back')]
+        self.menu.set(T('게임 정보', 'About'), rows, '', '')
+
+    def set_window_icon(self):
+        """창 아이콘 - PNG 를 만들어서 지정"""
+        if self.offscreen:
+            return
+        try:
+            path = os.path.join(tempfile.gettempdir(), 'kart3d_icon_v2.png')
+            if not os.path.isfile(path):
+                draw_icon(64).write(Filename.fromOsSpecific(path))
+            props = WindowProperties()
+            props.setIconFilename(Filename.fromOsSpecific(path))
+            self.win.requestProperties(props)
+        except Exception:
+            pass
+
+    def mouse_pos(self):
+        mw = self.mouseWatcherNode
+        if mw is None or not mw.hasMouse():
+            return None
+        m = mw.getMouse()
+        return (m.getX() * self.getAspectRatio(), m.getY())
+
+    def on_mouse(self, kind):
+        """마우스 버튼/휠: 편집기면 편집기로, 메뉴가 떠 있으면 메뉴로"""
+        if self.input.active:
+            return
+        if self.scene == 'editor':
+            mk = self.maker
+            if kind == 'l':
+                mk.on_down()
+            elif kind == 'lu':
+                mk.on_up()
+            elif kind == 'r':
+                mk.on_rdown()
+            elif kind == 'ru':
+                mk.on_rup()
+            elif kind in ('wu', 'wd'):
+                mk.on_wheel(1 if kind == 'wu' else -1)
+            return
+        if self.scene == 'race' and not self.paused:
+            return
+        if self.menu.visible and kind in ('l', 'r', 'wu', 'wd'):
+            self.menu.mouse(kind, self.mouse_pos(), self.mult())
 
     # ---- 솔로 ----
     def draw_outline(self, mid):
@@ -442,16 +569,18 @@ class Game(ShowBase):
             self.start_solo()
 
         def mode(m=1):
-            self.profile['mode'] = 'speed' if self.profile['mode'] == 'item' else 'item'
+            order = ['speed', 'item', 'time']
+            cur = self.profile['mode'] if self.profile['mode'] in order else 'item'
+            self.profile['mode'] = order[(order.index(cur) + (1 if m >= 0 else -1)) % 3]
             self.profile.save()
             self.build_solo()
-        mname = T('아이템전 (아이템 100종)', 'Item battle (100 items)') if self.profile['mode'] == 'item' else T('스피드전', 'Speed race')
+        mname = self.mode_name()
 
         def src(m=1):
             self.profile['map_src'] = 'custom'
             self.profile.save()
             self.build_solo()
-        rows = [self.R('%s  < %s >' % (T('모드', 'Mode'), mname), mode, mode, mode, id='mode'),
+        rows = [self.R('%s  < %s >' % (T('모드', 'Mode'), mname), mode, lambda m=1: mode(-1), mode, id='mode'),
                 self.R('%s  < %s >' % (T('맵 종류', 'Maps'), T('기본 맵 1000개', 'Built-in 1000')), src, src, src, id='src'),
                 self.R('%s  < #%d / %d >' % (T('맵', 'Map'), mid, MAP_COUNT), typemap, chg(-1), chg(1), id='map'),
                 self.R('%s  < %s (%d/%d) >' % (T('바이옴', 'Biome'), fname, fam + 1, BIOME_FAMILIES), None, setpart(0, -1), setpart(0, 1), id='theme'),
@@ -461,13 +590,15 @@ class Game(ShowBase):
                 self.R('%s  < %d >' % (T('AI 상대', 'AI rivals'), int(self.profile['bots'])), None, bots(-1), bots(1), id='bots'),
                 self.R(T('출발!', 'START!'), start, kind='primary', id='start'),
                 self.R(T('뒤로', 'Back'), lambda: self.back(), id='back')]
-        self.menu.set(T('솔로 레이스', 'Solo race'), rows, '%s  ·  %s' % (name, theme),
+        self.menu.set(T('솔로 레이스', 'Solo race'), rows, '%s  ·  %s   |   %s' % (name, theme, self.rec_text(mid, int(self.profile['laps']))),
                       T('←→ ±1   Shift ±10   Ctrl ±100   R 랜덤   T 바이옴   Enter(맵) 번호 입력', 'Left/Right ±1   Shift ±10   Ctrl ±100   R random   T biome   Enter on map: type number'))
         self.draw_outline(mid)
 
     def build_solo_custom(self):
         def mode(m=1):
-            self.profile['mode'] = 'speed' if self.profile['mode'] == 'item' else 'item'
+            order = ['speed', 'item', 'time']
+            cur = self.profile['mode'] if self.profile['mode'] in order else 'item'
+            self.profile['mode'] = order[(order.index(cur) + (1 if m >= 0 else -1)) % 3]
             self.profile.save()
             self.build_solo()
 
@@ -491,9 +622,9 @@ class Game(ShowBase):
         def start():
             self.profile.save()
             self.start_solo()
-        mname = T('아이템전 (아이템 100종)', 'Item battle (100 items)') if self.profile['mode'] == 'item' else T('스피드전', 'Speed race')
+        mname = self.mode_name()
         crows, d = self.custom_rows()
-        rows = [self.R('%s  < %s >' % (T('모드', 'Mode'), mname), mode, mode, mode, id='mode'),
+        rows = [self.R('%s  < %s >' % (T('모드', 'Mode'), mname), mode, lambda m=1: mode(-1), mode, id='mode'),
                 self.R('%s  < %s >' % (T('맵 종류', 'Maps'), T('내가 만든 맵 (%d)' % len(self.store.maps), 'My maps (%d)' % len(self.store.maps))), src, src, src, id='src')]
         rows += crows
         if d is not None:
@@ -506,7 +637,7 @@ class Game(ShowBase):
         sub = ''
         if d is not None:
             th = biome(d['look'])
-            sub = u'\u2605 %s  ·  %s' % (d['name'], th['name'] if LANG == 'ko' else th['en'])
+            sub = u'\u2605 %s  ·  %s   |   %s' % (d['name'], th['name'] if LANG == 'ko' else th['en'], self.rec_text(d, int(self.profile['laps'])))
         self.menu.set(T('솔로 레이스', 'Solo race'), rows, sub, T('←→ 값 변경   Enter 확인', 'Left/Right change   Enter OK'))
         if d is not None:
             self.draw_outline(d)
@@ -658,37 +789,6 @@ class Game(ShowBase):
             Bar(self.menu.extra, x0 + 0.3, z + 0.9 - 0.005, 0.5, 0.035, (1, 0.69, 0.13, 1)).set(st[key] / 10.0)
 
     # ---- 설정 ----
-    def build_settings(self):
-        def lang():
-            order = ['auto', 'ko', 'en']
-            self.profile['lang'] = order[(order.index(self.profile['lang']) + 1) % 3]
-            global LANG
-            LANG = ('ko' if self.font else 'en') if self.profile['lang'] == 'auto' else self.profile['lang']
-            self.profile.save()
-            self.build_settings()
-
-        def snd():
-            self.profile['sound'] = not self.profile['sound']
-            self.audio.enabled = bool(self.profile['sound'])
-            self.profile.save()
-            self.build_settings()
-
-        def fps():
-            self.show_fps = not self.show_fps
-            self.build_settings()
-
-        def steer_resp():
-            self.profile['steer_resp'] = (int(self.profile['steer_resp']) + 1) % 3
-            self.profile.save()
-            self.build_settings()
-        sn = [T('부드럽게', 'Smooth'), T('보통', 'Normal'), T('빠르게', 'Quick')]
-        rows = [self.R('%s: %s' % (T('언어 / Language', 'Language'), self.profile['lang']), lang, id='lang'),
-                self.R('%s: %s' % (T('소리', 'Sound'), 'ON' if self.profile['sound'] else 'OFF'), snd, id='snd'),
-                self.R('%s: %s' % (T('조향 반응', 'Steering'), sn[int(self.profile['steer_resp']) % 3]), steer_resp, id='steer'),
-                self.R('FPS: %s' % ('ON' if self.show_fps else 'OFF'), fps, id='fps'),
-                self.R(T('완료', 'Done'), lambda: self.back(), id='done')]
-        self.menu.set(T('설정', 'Settings'), rows, '', T('Enter 로 값 변경', 'Enter to change'))
-
     # ---- 멀티플레이 ----
     def scan_rooms(self):
         if not self.scan.get('busy'):
@@ -838,6 +938,24 @@ class Game(ShowBase):
             self._lobby_map = key
 
     # ------------------------------------------------------------------ 레이스
+    def mode_name(self):
+        m = self.profile['mode']
+        if m == 'item':
+            return T('아이템전 (아이템 100종)', 'Item battle (100 items)')
+        if m == 'time':
+            return T('타임 어택 (혼자 · 기록 도전)', 'Time attack (solo · records)')
+        return T('스피드전', 'Speed race')
+
+    def rec_text(self, ref, laps):
+        r = rec_get(self.profile, ref)
+        parts = []
+        if isinstance(r.get('lap'), (int, float)):
+            parts.append(T('최고 랩 ', 'Best lap ') + fmt_time(r['lap']))
+        rk = r.get('race%d' % int(laps))
+        if isinstance(rk, (int, float)):
+            parts.append(T('%d바퀴 최고 ' % int(laps), 'Best %d laps ' % int(laps)) + fmt_time(rk))
+        return '   '.join(parts) if parts else T('아직 기록 없음', 'No records yet')
+
     def solo_map(self):
         if self.test_map is not None:
             return self.test_map
@@ -849,10 +967,13 @@ class Game(ShowBase):
 
     def start_solo(self):
         p = self.profile
-        entries = solo_entries(p.display_name(), p['kart'], int(p['bots']))
+        ta = p['mode'] == 'time'
+        entries = solo_entries(p.display_name(), p['kart'], 0 if ta else int(p['bots']))
         ref = self.solo_map()
         self.start_race(ref, int(p['laps']) if self.test_map is None else int(ref['laps']), entries, False, True,
                         5.0 if self.test_map is None else 3.0, p['mode'] == 'item')
+        if ta and self.race is not None:
+            self.hud.say(self.rec_text(ref, self.race.laps), 5.0, False, (1, 0.9, 0.5, 1))
 
     def use_item(self, slot):
         if self.race is not None and self.race.items is not None and not (self.paused and not self.race.multi):
@@ -875,11 +996,13 @@ class Game(ShowBase):
         self.nodes = {rc.id: KartNode(self, rc, self.world.root) for rc in self.race.racers}
         self.particles = Particles(self)
         wk = self.race.track.theme.get('weather')
-        self.weather = Weather(self, wk, self.race.track.theme.get('wcol')) if wk else None
+        self.weather = Weather(self, wk, self.race.track.theme.get('wcol')) if (wk and GFX.get('weather_k', 1.0) > 0) else None
+        self.audio.music('race', music_seed(map_id))
+        self.audio.music_rate(1.0)
         self.hud.build_minimap(self.race.track)
         self.hud.mapname.setText(map_title(map_id, LANG))
         self.hud.show(True)
-        self.chase = ChaseCam()
+        self.chase.reset()                 # 설정한 카메라 거리(k)는 그대로 두고 위치만 처음부터
         self.steer = 0.0
         self.paused = False
         self.finish_at = None
@@ -901,6 +1024,7 @@ class Game(ShowBase):
             rows = [self.R(T('계속하기', 'Resume'), self.toggle_pause, kind='primary', id='resume')]
             if not self.race.multi:
                 rows.append(self.R(T('다시 시작', 'Restart'), lambda: (setattr(self, 'paused', False), self.start_solo()), id='restart'))
+            rows.append(self.R(T('설정 (그래픽 · 소리 · 조작)', 'Settings (graphics · audio · controls)'), lambda: self.open_settings('main', True), id='psettings'))
             rows.append(self.R(T('나가기', 'Quit'), self.leave_race, id='quit'))
             self.menu.show(True)
             self.menu.set(T('일시정지', 'Paused'), rows, '', '')
@@ -957,8 +1081,15 @@ class Game(ShowBase):
                 self.audio.play('go')
                 self.hud.say('GO!', 1.0, True)
             elif kind == 'lap':
-                self.hud.say('FINAL LAP!' if ev[2] else 'LAP %d' % ev[1], 1.6)
+                last = race.lap_times[-1] if race.lap_times else None
+                best = last is not None and last <= min(race.lap_times)
+                txt = ('FINAL LAP!' if ev[2] else 'LAP %d/%d' % (ev[1], race.laps))
+                if last is not None:
+                    txt += '   %s%s' % (u'\u2605 ' if best and len(race.lap_times) > 1 else '', fmt_time(last))
+                self.hud.say(txt, 2.0, False, (1, 0.86, 0.3, 1) if (best and len(race.lap_times) > 1) else (1, 0.8, 0.27, 1))
                 self.audio.play('lap')
+                if ev[2] and race.laps > 1:
+                    self.audio.music_rate(1.06)          # 마지막 바퀴: 음악이 살짝 빨라진다
             elif kind == 'finish':
                 self.hud.say('FINISH!', 3.0, True)
                 self.audio.play('finish')
@@ -1137,7 +1268,7 @@ class Game(ShowBase):
         # 카메라
         cp = self.chase.update(dt, loc, sim.stats['max_speed'])
         self.shake = max(0.0, self.shake - dt * 2.2)
-        sh = self.shake * 0.25 + (0.05 if loc.boosting else 0.0)
+        sh = (self.shake * 0.25 + (0.05 if loc.boosting else 0.0)) if self.profile['shake'] else 0.0
         pos = PV(cp[0] + (_random.random() - 0.5) * sh, cp[1] + (_random.random() - 0.5) * sh, cp[2] + (_random.random() - 0.5) * sh)
         yaw, pitch = cp[3], cp[4]
         d = PV(math.sin(yaw) * math.cos(pitch), -math.sin(pitch), math.cos(yaw) * math.cos(pitch))
@@ -1145,17 +1276,22 @@ class Game(ShowBase):
         self.camera.lookAt(Point3(pos[0] + d[0] * 20, pos[1] + d[1] * 20, pos[2] + d[2] * 20), Vec3(0, 0, 1))
         self.cam_pos, self.cam_fwd = pos, d          # 카메라 뒤 물체 갱신 생략용
         ratio = loc.speed / sim.stats['max_speed']
-        self.camLens.setFov(82 + clamp(ratio, 0, 1.2) * 8 + (6 if loc.boosting else 0))
+        fov = float(self.profile['fov'])
+        if self.profile['speed_fx']:
+            fov += clamp(ratio, 0, 1.2) * 8 + (6 if loc.boosting else 0)
+        self.camLens.setFov(fov)
         self.world.update(pos)
         if self.particles is not None:
             self.particles.update(dt if not self.paused else 0.0)
         if self.weather is not None:
             self.weather.update(dt, pos)
-        self.hud.update(race, time.time())
+        if self.scene != 'results':                 # 결과 화면에선 HUD 를 숨긴 채로 둔다
+            self.hud.update(race, time.time())
         if race.items is not None:
             if self.item_world is not None:
                 self.item_world.update(dt)
-            self.item_hud.update(race, self.t)
+            if self.scene != 'results':
+                self.item_hud.update(race, self.t)
             self.screen_fx.update(sim.blind_t, dt)
         self._fps_t = getattr(self, '_fps_t', 0.0) + dt
         if self._fps_t > 0.25:
@@ -1176,6 +1312,21 @@ class Game(ShowBase):
     def build_results(self):
         race = self.race
         rows = []
+        if race.local is not None and race.local.finished and not getattr(race, '_rec_done', False):
+            race._rec_done = True
+            if race.items is None:                    # 아이템전 기록은 저장 안 함
+                race._rec = rec_submit(self.profile, race.map_id, race.laps, race.lap_times, race.local.finish_time)
+        rec = getattr(race, '_rec', None)
+        if race.lap_times:
+            best = min(race.lap_times)
+            rows.append(self.I(T('이번 최고 랩 ', 'Best lap this race ') + fmt_time(best) + (T('   ★ 랩 신기록!', '   ★ NEW LAP RECORD!') if rec and rec[0] else ''),
+                               (1, 0.86, 0.3, 1) if rec and rec[0] else (0.8, 0.86, 1, 1), 0.05))
+        if rec and rec[1]:
+            rows.append(self.I(T('★ 완주 신기록!', '★ NEW RACE RECORD!'), (1, 0.86, 0.3, 1), 0.055))
+        if race.items is not None:
+            rows.append(self.I(T('(아이템전 기록은 저장하지 않아요 — 스피드전/타임 어택에서 기록 도전!)', '(Item battles do not set records — try Speed or Time attack)'), scale=0.04))
+        else:
+            rows.append(self.I(self.rec_text(race.map_id, race.laps), (0.75, 0.82, 0.95, 1), 0.045))
         for i, rc in enumerate(race.ranking()):
             me = rc is race.local
             rows.append(self.I('%2d  %-14s %s' % (i + 1, rc.name, fmt_time(rc.finish_time) if rc.finished else T('주행 중…', 'racing…')), (1, 0.72, 0.15, 1) if me else (0.95, 0.97, 1, 1), 0.052))
@@ -1187,8 +1338,10 @@ class Game(ShowBase):
         else:
             rows.append(self.R(T('다시 달리기', 'Race again'), self.start_solo, kind='primary', id='again'))
         rows.append(self.R(T('메뉴로', 'Menu'), self.leave_race, id='menu'))
+        self.hud.show(False)               # 결과 화면에서는 레이스 HUD 를 숨겨서 겹치지 않게
+        self.item_hud.show(False)
         self.menu.show(True)
-        self.menu.set(T('결과', 'Results'), rows, '', '')
+        self.menu.set(T('결과', 'Results'), rows, map_title(race.map_id, LANG), '')
 
     def leave_to_lobby(self):
         self.race = None
@@ -1202,7 +1355,13 @@ class Game(ShowBase):
         dt = self.dt_override if self.dt_override is not None else min(ClockObject.getGlobalClock().getDt(), 0.1)
         self.t += dt
         self.input.tick(dt)
+        self.audio.tick()
         sc = self.scene
+        if sc != 'editor' and self.menu.visible and not self.input.active:
+            mp = self.mouse_pos()
+            if mp is not None and mp != self.last_mouse:
+                self.last_mouse = mp
+                self.menu.hover(mp)
         if sc in ('multi',) and self.scan.get('done'):
             self.scan['done'] = False
             self.build_multi()

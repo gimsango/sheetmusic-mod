@@ -94,7 +94,11 @@ class World(object):
         fog = Fog('fog')
         fog.setColor(fc[0] / 255.0, fc[1] / 255.0, fc[2] / 255.0)
         fog.setMode(Fog.MExponentialSquared)
-        fog.setExpDensity(th['fog_d'])
+        dens = th['fog_d']
+        cm = GFX.get('cull_m', 0.0)
+        if cm > 0:
+            dens = max(dens, 1.3 / cm)            # 숨기는 거리 근처는 안개로 자연스럽게 가려지게
+        fog.setExpDensity(dens * GFX.get('fog_k', 1.0))
         self.fog = fog
         self.app.render.setFog(fog)
         self.app.setBackgroundColor(fc[0] / 255.0, fc[1] / 255.0, fc[2] / 255.0)
@@ -767,8 +771,11 @@ class World(object):
         protos = {}
         chunks = {}
         holder = NodePath('protos')
-        for p in tr.props:
+        pk = GFX.get('props_k', 1.0)
+        for n, p in enumerate(tr.props):
             kind = p['kind']
+            if pk < 0.999 and not p.get('user') and (hash32(n * 31 + 7) % 1000) >= pk * 1000:
+                continue                          # 장식물 밀도 설정 (직접 놓은 물건은 항상 보임)
             nv = PROP_VARS.get(kind, 1)
             var = int(p['r1'] * nv) % nv if nv > 1 else 0
             key = (kind, var)
@@ -806,8 +813,11 @@ class World(object):
                 inst.setScale(*sc)
                 if shade != 1.0:
                     inst.setColorScale(shade, shade, shade, 1)
-        for chunk in chunks.values():
+        self.chunks = []
+        for ck, chunk in chunks.items():
             chunk.flattenStrong()
+            i = min(tr.N - 1, ck * 36 + 18)
+            self.chunks.append([PV(tr.px[i], tr.py[i], tr.pz[i]), chunk, True])
         holder.removeNode()
 
     def _lamps(self):
@@ -843,6 +853,18 @@ class World(object):
     # ---- 갱신/정리 ---------------------------------------------------------------------------
     def update(self, cam_pos):
         self.sky.setPos(*cam_pos)
+        cm = GFX.get('cull_m', 0.0)
+        if cm > 0 and getattr(self, 'chunks', None):
+            lim = (cm + 160.0) ** 2              # 묶음 반지름만큼 여유
+            for c in self.chunks:
+                p = c[0]
+                on = (p[0] - cam_pos[0]) ** 2 + (p[1] - cam_pos[1]) ** 2 < lim
+                if on != c[2]:
+                    c[2] = on
+                    if on:
+                        c[1].show()
+                    else:
+                        c[1].hide()
 
     def destroy(self):
         for l in self.lights:

@@ -172,7 +172,9 @@ class HUD(object):
         self._set(self.tot, '/%d' % len(race.racers))
         self._set(self.lap, 'LAP %d/%d' % (min(race.laps, sim.lap), race.laps))
         self._set(self.time, fmt_time(max(0.0, race.t)))
-        self._set(self.spd, str(int(sim.speed * 3.6)))
+        mph = self.app.profile['units'] == 'mph'
+        self._set(self.spd, str(int(sim.speed * (2.23694 if mph else 3.6))))
+        self._set(self.kmh, 'mph' if mph else 'km/h')
         self.boost.set(sim.speed / sim.stats['max_speed'], (1.0, 0.63, 0.16, 1) if sim.boost_t > 0 else (0.1, 0.9, 1.0, 1))
         if sim.drifting:
             col = [(0.67, 0.8, 1, 1), (0.23, 0.67, 1, 1), (1, 0.63, 0.16, 1), (0.82, 0.31, 1, 1)][sim.drift_tier]
@@ -255,6 +257,7 @@ class MenuUI(object):
         self.subtitle = ''
         self.hint = ''
         self.visible = True
+        self.row_z = {}
         cm = CardMaker('panel')
         cm.setFrame(0.03, 1.72, -1.97, -0.04)
         self.panel = self.root.attachNewNode(cm.generate())
@@ -289,6 +292,7 @@ class MenuUI(object):
         if self.subtitle:
             self.nodes.append(OnscreenText(text=self.subtitle, pos=(0.12, -0.34), scale=0.05, fg=(0.8, 0.86, 1, 1), **kw))
         z = -0.5
+        self.row_z = {}
         for i, r in enumerate(self.rows):
             kind = r.get('kind', 'item')
             if kind == 'info':
@@ -300,7 +304,15 @@ class MenuUI(object):
             en = r.get('enabled', True)
             col = (1, 0.78, 0.22, 1) if sel else ((0.55, 0.57, 0.63, 1) if not en else ((1, 0.55, 0.45, 1) if kind == 'primary' else (0.95, 0.97, 1, 1)))
             txt = ('> ' if sel else '   ') + r['text']
-            self.nodes.append(OnscreenText(text=txt, pos=(0.1, z), scale=0.074, fg=col, **kw))
+            t = OnscreenText(text=txt, pos=(0.1, z), scale=0.074, fg=col, **kw)
+            try:
+                w = t.textNode.calcWidth(txt) * 0.074
+                if w > 1.58:
+                    t.setScale(0.074 * 1.58 / w)       # 긴 줄은 패널 안에 들어가게
+            except Exception:
+                pass
+            self.nodes.append(t)
+            self.row_z[i] = z
             z -= 0.1
         if self.hint:
             self.nodes.append(OnscreenText(text=self.hint, pos=(0.12, -1.9), scale=0.04, fg=(0.7, 0.78, 0.95, 1), **kw))
@@ -331,6 +343,51 @@ class MenuUI(object):
         elif name in ('enter', 'space') and r and r.get('enter'):
             self.app.sfx_play('click', 0.5)
             r['enter']()
+        else:
+            return False
+        return True
+
+    # ---- 마우스: 올리면 선택, 클릭 = 실행/다음 값, 오른쪽 클릭 = 이전 값, 휠 = 값 바꾸기 ----
+    def row_at(self, pos):
+        if pos is None or not self.visible:
+            return -1
+        a = self.app.getAspectRatio()
+        x, z = pos[0] + a, pos[1] - 1.0
+        if not (0.04 <= x <= 1.72):
+            return -1
+        for i, rz in self.row_z.items():
+            if rz - 0.03 <= z <= rz + 0.075 and self._selectable(i):
+                return i
+        return -1
+
+    def hover(self, pos):
+        i = self.row_at(pos)
+        if i >= 0 and i != self.sel:
+            self.sel = i
+            self.rebuild()
+
+    def mouse(self, kind, pos, mult=1):
+        i = self.row_at(pos)
+        if i < 0:
+            return False
+        if i != self.sel:
+            self.sel = i
+            self.rebuild()
+        r = self.rows[i]
+        if kind == 'l':
+            if r.get('enter'):
+                self.app.sfx_play('click', 0.5)
+                r['enter']()
+            elif r.get('right'):
+                self.app.sfx_play('click', 0.4)
+                r['right'](mult)
+        elif kind == 'r' and r.get('left'):
+            self.app.sfx_play('click', 0.4)
+            r['left'](mult)
+        elif kind == 'wu' and r.get('right'):
+            r['right'](mult)
+        elif kind == 'wd' and r.get('left'):
+            r['left'](mult)
         else:
             return False
         return True

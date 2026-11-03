@@ -2,3 +2,8 @@
 __pycache__/
 kart3d_error.txt
 kart3d_profile.json
+kart3d_maps.json
+build/
+dist/
+build_icons/
+*.egg-info/

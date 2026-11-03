@@ -26,6 +26,12 @@ import json
 import array
 import subprocess
 import random as _random
+
+for _st in (sys.stdout, sys.stderr):      # 콘솔이 한글을 못 쓰는 환경(ASCII)에서도 글자 출력 때문에 멈추지 않게
+    try:
+        _st.reconfigure(errors='backslashreplace')
+    except Exception:
+        pass
 from operator import itemgetter
 
 
@@ -49,7 +55,14 @@ def _crash_log(text):
         base = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] else '.'
     except Exception:
         base = '.'
-    for d in (base, os.path.expanduser('~'), '.'):
+    dirs = [base, os.path.expanduser('~'), '.']
+    try:
+        sd = globals().get('save_dirs')            # 설치판이면 사용자 폴더가 먼저 (프로그램 폴더는 쓰기 금지일 수 있음)
+        if sd is not None:
+            dirs = [d or '.' for d in sd()] + dirs
+    except Exception:
+        pass
+    for d in dirs:
         try:
             path = os.path.join(d, 'kart3d_error.txt')
             with open(path, 'a', encoding='utf-8') as f:
@@ -219,8 +232,9 @@ import time
 import os
 import sys
 import queue
+import array
 
-VERSION = '1.1'
+VERSION = '1.2'
 MAP_COUNT = 1000
 KART_COUNT = 100000
 DEFAULT_PORT = 5555
@@ -2604,6 +2618,8 @@ class Race(object):
         self.auto_local = auto_local
         self.count_left = countdown
         self.items = ItemSystem(self) if items else None
+        self.lap_start = 0.0          # 내 카트의 이번 바퀴 시작 시각
+        self.lap_times = []           # 내 카트의 바퀴별 시간 (기록용)
 
     def ev(self, e):
         self._pend.append(e)
@@ -2677,6 +2693,7 @@ class Race(object):
                     sim.finished = True
                     self.finish_order.append(rc)
                     if rc.kind == 'local':
+                        self.lap_times.append(self.t - self.lap_start)
                         self.ev(('finish',))
                         if self.net is not None and self.multi:
                             self.net.send({'t': 'fin', 'time': round(rc.finish_time, 2)})
@@ -2685,6 +2702,8 @@ class Race(object):
                     self.ev(('sim', e))
                 lap = min(self.laps, sim.lap)
                 if lap > self.last_lap and running:
+                    self.lap_times.append(self.t - self.lap_start)
+                    self.lap_start = self.t
                     self.ev(('lap', lap, lap == self.laps))
                     self.last_lap = lap
         if items is not None:
@@ -3360,12 +3379,60 @@ def serve_forever(port=DEFAULT_PORT):
 # ----------------------------------------------------------------------------
 #  설정/프로필 저장 (JSON 파일, 실패해도 게임은 계속 동작)
 # ----------------------------------------------------------------------------
+def user_data_dir():
+    """설치판이 저장할 사용자 폴더 (Windows: %APPDATA%/TurboKart3D, macOS: Application Support, Linux: ~/.local/share)"""
+    try:
+        if sys.platform.startswith('win'):
+            base = os.environ.get('APPDATA') or os.path.expanduser('~')
+        elif sys.platform == 'darwin':
+            base = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support')
+        else:
+            base = os.environ.get('XDG_DATA_HOME') or os.path.join(os.path.expanduser('~'), '.local', 'share')
+        d = os.path.join(base, 'TurboKart3D')
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        return d
+    except Exception:
+        return None
+
+
+def save_dirs():
+    """저장 파일을 찾을/쓸 폴더 순서. 스크립트로 실행하면 게임 파일 옆이 먼저,
+    설치판(스팀 등으로 묶은 실행 파일)은 프로그램 폴더가 쓰기 금지일 수 있어서 사용자 폴더가 먼저"""
+    out = []
+    if getattr(sys, 'frozen', False):
+        d = user_data_dir()
+        if d:
+            out.append(d)
+    try:
+        out.append(os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv and sys.argv[0] else __file__)))
+    except Exception:
+        pass
+    try:
+        out.append(os.path.expanduser('~'))
+    except Exception:
+        pass
+    out.append('')
+    seen = []
+    for d in out:
+        if d not in seen:
+            seen.append(d)
+    return seen
+
+
 class Profile(dict):
     DEFAULTS = {'name': '', 'kart': None, 'map': 1, 'laps': 3, 'bots': 7, 'quality': 1, 'auto_gas': True, 'sound': True,
                 'lang': 'auto', 'last_ip': '', 'port': DEFAULT_PORT, 'steer_mode': 'buttons', 'steer_resp': 1,
-                'mode': 'item',           # 'item' = 아이템전, 'speed' = 스피드전
+                'mode': 'item',           # 'item' = 아이템전, 'speed' = 스피드전, 'time' = 타임 어택(혼자, 기록 도전)
                 'map_src': 'builtin',     # 'builtin' = 기본 맵(1~1000), 'custom' = 내가 만든 맵
-                'cmap': ''}               # 고른 '내 맵' 의 uid
+                'cmap': '',               # 고른 '내 맵' 의 uid
+                # 소리 (0~1)
+                'vol_master': 1.0, 'vol_sfx': 1.0, 'vol_engine': 0.8, 'vol_music': 0.5, 'music': True,
+                # 게임/카메라
+                'units': 'kmh', 'shake': True, 'speed_fx': True, 'cam_dist': 1, 'records': {},
+                # PC 그래픽/화면 (폰은 'quality' 를 씀)
+                'gfx': 'high', 'msaa': 4, 'aniso': 8, 'view': 2, 'props_k': 1.0, 'fx_k': 1.0, 'weather_k': 1.0, 'shadows': True,
+                'display': 'window', 'res': '', 'vsync': True, 'fps_cap': 0, 'fov': 82}
 
     def __init__(self, filename='kart3d_profile.json'):
         dict.__init__(self)
@@ -3375,19 +3442,26 @@ class Profile(dict):
         self.load()
         if self['kart'] is None:
             self['kart'] = int(time.time() * 1000) % KART_COUNT
+        self['kart'] = int(self['kart']) % KART_COUNT
 
     def _candidates(self):
-        out = []
-        try:
-            out.append(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv and sys.argv[0] else __file__)), self.filename))
-        except Exception:
-            pass
-        try:
-            out.append(os.path.join(os.path.expanduser('~'), self.filename))
-        except Exception:
-            pass
-        out.append(self.filename)
-        return out
+        return [os.path.join(d, self.filename) if d else self.filename for d in save_dirs()]
+
+    _BAD = object()
+
+    @classmethod
+    def _fix(cls, default, v):
+        """저장 파일 값 검사: 기본값과 같은 종류면 (필요하면 고쳐서) 돌려주고, 아니면 _BAD (손으로 고친 파일 대비)"""
+        num = isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) < 1e9
+        if default is None or (isinstance(default, int) and not isinstance(default, bool)):
+            if default is None and v is None:
+                return None
+            return int(v) if num else cls._BAD
+        if isinstance(default, float):
+            return float(v) if num else cls._BAD
+        if isinstance(default, bool):
+            return v if isinstance(v, bool) else cls._BAD
+        return v if isinstance(v, type(default)) else cls._BAD
 
     def load(self):
         for p in self._candidates():
@@ -3398,7 +3472,9 @@ class Profile(dict):
                     if isinstance(data, dict):
                         for k, v in data.items():
                             if k in self.DEFAULTS:
-                                self[k] = v
+                                v = self._fix(self.DEFAULTS[k], v)
+                                if v is not self._BAD:
+                                    self[k] = v
                         self.path = p
                         return
             except Exception:
@@ -3420,6 +3496,50 @@ class Profile(dict):
     def display_name(self):
         n = str(self['name']).strip()
         return n if n else 'Racer%d' % (1 + int(self['kart']) % 99)
+
+
+# ---- 기록 (맵마다 최고 랩 / 바퀴 수별 최고 완주 시간) ----
+def rec_key(ref):
+    if isinstance(ref, dict):
+        return 'c%08x' % cmap_key(ref)
+    return 'm%d' % int(ref)
+
+
+def rec_get(profile, ref):
+    recs = profile.get('records')
+    r = recs.get(rec_key(ref)) if isinstance(recs, dict) else None
+    return r if isinstance(r, dict) else {}
+
+
+def rec_submit(profile, ref, laps, lap_times, race_time):
+    """레이스 기록 저장. 반환 (새 최고 랩, 새 최고 완주) - 아이템전 기록은 넣지 않는다 (공정하게)"""
+    recs = profile.get('records')
+    if not isinstance(recs, dict):
+        recs = {}
+    key = rec_key(ref)
+    r = recs.get(key)
+    if not isinstance(r, dict):
+        r = {}
+    new_lap = new_race = False
+    good = [t for t in (lap_times or []) if t > 2.0]
+    if good:
+        bl = min(good)
+        if not isinstance(r.get('lap'), (int, float)) or bl < r['lap']:
+            r['lap'] = round(bl, 3)
+            new_lap = True
+    if race_time is not None and race_time > 2.0:
+        rk = 'race%d' % int(laps)
+        if not isinstance(r.get(rk), (int, float)) or race_time < r[rk]:
+            r[rk] = round(race_time, 3)
+            new_race = True
+    recs.pop(key, None)
+    recs[key] = r                          # 최근에 달린 맵을 뒤로 (오래된 것부터 정리되게)
+    if len(recs) > 4000:
+        for k in list(recs.keys())[:500]:
+            del recs[k]
+    profile['records'] = recs
+    profile.save()
+    return new_lap, new_race
 
 
 # ----------------------------------------------------------------------------
@@ -3525,12 +3645,16 @@ class KartModel(object):
         self.spin = 0.0
 
 
+CAM_K = [0.82, 1.0, 1.22]          # 카메라 거리 설정 (가까이 / 보통 / 멀리)
+
+
 class ChaseCam(object):
     """추격 카메라: 카트 뒤쪽 위에서 부드럽게 따라간다"""
 
     def __init__(self):
         self.h = None
         self.y = 0.0
+        self.k = 1.0           # 카메라 거리 배율 (설정: 가까이 0.82 / 보통 1 / 멀리 1.22)
 
     def reset(self):
         self.h = None
@@ -3543,8 +3667,8 @@ class ChaseCam(object):
             self.y = rc.y
         self.h += wrap_pi(target - self.h) * (1 - math.exp(-7.0 * dt))
         self.y += (rc.y - self.y) * (1 - math.exp(-9.0 * dt))
-        dist = 8.3 + sr * 2.2 + (1.6 if rc.boosting else 0.0)
-        hgt = 3.5 + sr * 0.4
+        dist = (8.3 + sr * 2.2 + (1.6 if rc.boosting else 0.0)) * self.k
+        hgt = (3.5 + sr * 0.4) * (0.6 + 0.4 * self.k)
         fx, fz = math.sin(self.h), math.cos(self.h)
         x, y, z = rc.x - fx * dist, self.y + hgt, rc.z - fz * dist
         lx, ly, lz = rc.x + fx * 8.0, self.y + 1.2, rc.z + fz * 8.0
@@ -5194,17 +5318,7 @@ class MapStore(object):
         self.load()
 
     def _candidates(self):
-        out = []
-        try:
-            out.append(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv and sys.argv[0] else __file__)), self.filename))
-        except Exception:
-            pass
-        try:
-            out.append(os.path.join(os.path.expanduser('~'), self.filename))
-        except Exception:
-            pass
-        out.append(self.filename)
-        return out
+        return [os.path.join(d, self.filename) if d else self.filename for d in save_dirs()]
 
     def load(self):
         for p in self._candidates():
@@ -5523,6 +5637,303 @@ class MapEdit(object):
 
 def T_(lang, ko, en):
     return ko if lang == 'ko' else en
+
+
+# ----------------------------------------------------------------------------
+#  배경음악: 코드로 만드는 반복 곡 -> 16bit 모노 (파일 필요 없음, 폰/PC 같은 생성기)
+#  16마디 = A 부분 8마디 + B 부분 8마디 (코드 진행/베이스/드럼/멜로디가 바뀜), 끝이 처음과 이어져서 끊김 없이 반복
+#  악기: 패드(화음) + 베이스 + 아르페지오 + 멜로디(메아리) + 드럼(킥/스네어/하이햇/심벌)
+#  메뉴 곡 1개 + 레이스 곡 16종 (맵마다 조/빠르기/진행/리듬이 다름)
+#  같은 음은 한 번만 만들어서 재사용 -> PC 에서 한 곡 0.2~0.4초, 폰은 뒤에서 만들어서 렉 없음
+# ----------------------------------------------------------------------------
+MUSIC_RATE = 22050
+MUSIC_STYLES = 16
+_WT = 256
+
+
+def _wave_tables():
+    t = {}
+    t['sine'] = [math.sin(TAU * i / _WT) for i in range(_WT)]
+    t['tri'] = [4.0 * abs(i / float(_WT) - 0.5) - 1.0 for i in range(_WT)]
+    t['saw'] = [2.0 * i / _WT - 1.0 for i in range(_WT)]
+    t['sq'] = [1.0 if i < _WT // 2 else -1.0 for i in range(_WT)]
+    t['pulse'] = [1.0 if i < _WT // 4 else -0.35 for i in range(_WT)]
+    # 부드러운 톱니 (고조파 몇 개만) - 귀가 덜 아픈 베이스/리드
+    t['soft'] = [sum(math.sin(TAU * k * i / _WT) / k for k in range(1, 6)) * 0.55 for i in range(_WT)]
+    t['organ'] = [(math.sin(TAU * i / _WT) + 0.5 * math.sin(TAU * 2 * i / _WT) + 0.25 * math.sin(TAU * 4 * i / _WT)) * 0.6 for i in range(_WT)]
+    # 종소리 비슷한 맑은 소리 (메뉴 멜로디)
+    t['bell'] = [(math.sin(TAU * i / _WT) * 0.75 + math.sin(TAU * 3 * i / _WT) * 0.22 + math.sin(TAU * 5 * i / _WT) * 0.08) for i in range(_WT)]
+    return t
+
+
+_TABLES = None
+
+
+def _midi_hz(n):
+    return 440.0 * 2.0 ** ((n - 69) / 12.0)
+
+
+def _note(table, freq, n, rate, vol, attack, release, sustain=1.0):
+    """표를 훑어서 음 하나 (어택 -> 감쇠 -> 유지 -> 끝부분 페이드)"""
+    n = int(n)
+    if n <= 0:
+        return []
+    a = min(n, max(1, int(attack * rate)))
+    r = max(1, int(release * rate))
+    env = [vol * i / a for i in range(a)]
+    d = min(r, n - a)
+    if d > 0:
+        k = (1.0 - sustain) / r
+        env.extend([vol * (1.0 - k * j) for j in range(d)])
+    if n - a - d > 0:
+        env.extend([vol * sustain] * (n - a - d))
+    t0 = max(0, n - r)
+    inv = 1.0 / r
+    env[t0:] = [e * (n - i) * inv for i, e in enumerate(env[t0:], t0)]
+    stepf = freq * _WT / float(rate)
+    return [table[int(i * stepf) & 255] * e for i, e in enumerate(env)]
+
+
+def _add(mix, start, samples, gain=1.0):
+    """곡 끝을 넘어가는 부분은 처음으로 이어 붙여서 이음새 없이 반복되게 (mix 는 array('d'))"""
+    total = len(mix)
+    ln = len(samples)
+    if ln == 0 or total == 0:
+        return
+    start %= total
+    pos = 0
+    while pos < ln:
+        k = min(total - start, ln - pos)
+        seg = samples[pos:pos + k]
+        if gain == 1.0:
+            mix[start:start + k] = array.array('d', [a + b for a, b in zip(mix[start:start + k], seg)])
+        else:
+            mix[start:start + k] = array.array('d', [a + b * gain for a, b in zip(mix[start:start + k], seg)])
+        pos += k
+        start = 0
+
+
+def _drums(rate, rnd):
+    n = int(rate * 0.22)
+    kick = []
+    ph = 0.0
+    for i in range(n):
+        t = i / float(n)
+        f = 150.0 * (1 - t) ** 2.2 + 42.0
+        ph += f / rate
+        kick.append(math.sin(TAU * ph) * (1 - t) ** 1.6 * 0.95)
+    n = int(rate * 0.16)
+    snare = []
+    lp = 0.0
+    for i in range(n):
+        t = i / float(n)
+        lp += (rnd() * 2 - 1 - lp) * 0.6
+        snare.append((lp * 0.7 + math.sin(TAU * 190 * i / rate) * 0.35 * (1 - t)) * (1 - t) ** 2.0 * 0.6)
+    n = int(rate * 0.05)
+    hat = []
+    prev = 0.0
+    for i in range(n):
+        t = i / float(n)
+        x = rnd() * 2 - 1
+        hat.append((x - prev) * (1 - t) ** 3 * 0.22)
+        prev = x
+    n = int(rate * 0.2)
+    ohat = []
+    prev = 0.0
+    for i in range(n):
+        t = i / float(n)
+        x = rnd() * 2 - 1
+        ohat.append((x - prev) * (1 - t) ** 1.5 * 0.16)
+        prev = x
+    n = int(rate * 1.3)
+    crash = []
+    prev = 0.0
+    lp = 0.0
+    for i in range(n):
+        t = i / float(n)
+        x = rnd() * 2 - 1
+        lp += (x - lp) * 0.5
+        crash.append((x - prev * 0.6 + lp * 0.3) * (1 - t) ** 2.4 * 0.2)
+        prev = x
+    return kick, snare, hat, ohat, crash
+
+
+def make_music(style, seed, rate=MUSIC_RATE, bars=16):
+    """style: 'menu' 또는 'race'. seed 로 조/빠르기/진행/리듬이 바뀐다. 반환: array('h') (모노, rate Hz)"""
+    global _TABLES
+    if _TABLES is None:
+        _TABLES = _wave_tables()
+    W = _TABLES
+    menu = style == 'menu'
+    r = Rng(hash32(int(seed) * 977 + (11 if menu else 29)))
+    bpm = (90 + int(r() * 12)) if menu else (136 + int(r() * 20))
+    minor = r() < (0.45 if menu else 0.62)
+    scale = [0, 2, 3, 5, 7, 8, 10] if minor else [0, 2, 4, 5, 7, 9, 11]
+    root = 45 + int(r() * 8)                       # A2 ~ E3
+    if minor:
+        progs = [[0, 5, 2, 6], [0, 3, 4, 4], [0, 5, 3, 4], [0, 6, 5, 4], [5, 6, 0, 0], [0, 2, 3, 4], [3, 4, 0, 5]]
+    else:
+        progs = [[0, 4, 5, 3], [0, 5, 3, 4], [0, 3, 0, 4], [5, 3, 0, 4], [0, 1, 4, 4], [3, 4, 2, 5], [0, 5, 1, 4]]
+    ia = int(r() * len(progs))
+    ib = (ia + 1 + int(r() * (len(progs) - 1))) % len(progs)
+    prog = (progs[ia], progs[ib])
+    spb = rate * 60.0 / bpm                        # 한 박의 샘플 수
+    s16 = spb / 4.0
+    bars = max(4, int(bars))
+    half = bars // 2
+    total = int(round(spb * 4 * bars))
+    mix = array.array('d', bytes(8 * total))
+    kick, snare, hat, ohat, crash = _drums(rate, r)
+    snare_soft = [x * 0.55 for x in snare]
+    cache = {}
+    pads = {}
+
+    def note(tname, midi, n, vol, attack, release, sustain):
+        key = (tname, midi, int(n), vol, attack, release, sustain)
+        s = cache.get(key)
+        if s is None:
+            s = cache[key] = _note(W[tname], _midi_hz(midi), n, rate, vol, attack, release, sustain)
+        return s
+
+    def tone(deg, octave, chord):
+        o, d = divmod(deg, 7)
+        m = root + scale[d] + 12 * (o + octave)
+        if minor and chord % 7 == 4 and d == 6:    # 단조의 V 화음은 이끎음을 반음 올려서 (화성단음계) 끝맺음이 또렷하게
+            m += 1
+        return m
+
+    # 리듬/음색 고르기 (A 와 B 가 다르게)
+    bass_pats = [[1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0], [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1],
+                 [1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1], [1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0]]
+    ba = int(r() * len(bass_pats))
+    bass_pat = (bass_pats[ba], bass_pats[(ba + 1 + int(r() * 3)) % len(bass_pats)])
+    shapes = [[0, 1, 2, 1], [0, 2, 1, 2], [0, 1, 2, 3], [2, 1, 0, 1], [0, 2, 3, 2]]
+    sa = int(r() * len(shapes))
+    arp_shape = (shapes[sa], shapes[(sa + 2) % len(shapes)])
+    lead_t = 'pulse' if r() < 0.5 else 'organ'
+    bass_t = 'soft' if menu else ('saw' if r() < 0.5 else 'soft')
+    mel_t = ('bell' if r() < 0.6 else 'sine') if menu else ('sq' if r() < 0.6 else 'pulse')
+
+    # 멜로디: 강박은 화음 음, 약박은 이웃 음으로 걷기. 쉬는 칸이 있으면 앞 음을 늘인다 (A 는 8분음표, B 는 4분음표 위주)
+    def make_motif(steps, rest_p):
+        out = []
+        cur = int(r() * 3) * 2
+        for k in range(steps):
+            if k > 0 and r() < rest_p:
+                out.append(None)
+                continue
+            if k % 4 == 0 or r() < 0.3:
+                cur = [0, 2, 4, 7][int(r() * 4)]
+            else:
+                cur = max(-1, min(9, cur + [-2, -1, 1, 2][int(r() * 4)]))
+            out.append(cur)
+        return out
+    motif_a = make_motif(16, 0.36 if menu else 0.28)
+    motif_b = make_motif(8, 0.2)
+    # B 부분 드럼 변화
+    kick_b = [0, 3, 8, 10] if r() < 0.5 else [0, 6, 8, 14]
+    for bar in range(bars):
+        sec = 0 if bar < half else 1
+        bb = bar % half
+        chord = prog[sec][bb % 4]
+        b0 = int(bar * 4 * spb)
+        # 화음(패드): 마디 전체를 부드럽게. B 부분은 7음을 살짝 더해서 풍성하게
+        pad = pads.get((sec, chord))
+        if pad is None:                                  # 같은 화음은 한 번만 합쳐 두고 재사용
+            pv = 0.065 if menu else 0.048
+            for j, dg in enumerate((0, 2, 4) if sec == 0 else (0, 2, 4, 6)):
+                s = note('tri', tone(chord + dg, 1, chord), 4 * spb, pv * (0.6 if j == 3 else 1.0), 0.09, 0.5, 0.75)
+                pad = list(s) if pad is None else [a + b for a, b in zip(pad, s)]
+            pads[(sec, chord)] = pad
+        _add(mix, b0, pad)
+        # 베이스 (레이스: 8칸마다 한 옥타브 위로 튀기기)
+        pat = bass_pat[sec]
+        for k in range(16):
+            if pat[k]:
+                nb = tone(chord, -1, chord)
+                if not menu and k % 8 == 6:
+                    nb += 12
+                elif sec == 1 and k % 8 == 4:
+                    nb = tone(chord + 4, -1, chord)        # B 부분은 5음도 섞어서
+                _add(mix, b0 + int(k * s16), note(bass_t, nb, s16 * (1.8 if menu else 1.4), 0.22, 0.004, 0.08, 0.6))
+        # 아르페지오 (레이스는 16분, 메뉴는 8분)
+        step = 2 if menu else 1
+        shp = arp_shape[sec]
+        for k in range(0, 16, step):
+            dg = chord + [0, 2, 4, 7][shp[(k // step) % 4]]
+            _add(mix, b0 + int(k * s16), note(lead_t, tone(dg, 1 + sec, chord), s16 * step * 0.9, 0.04 if menu else 0.045 - 0.008 * sec, 0.003, 0.05, 0.4))
+        # 멜로디 + 메아리 (점8분 뒤에 작게 두 번)
+        if sec == 0:
+            phrase = bb // 2
+            first = (bb % 2) * 8
+            mot = motif_a[first:first + 8]
+            if phrase % 2 == 1:                          # 대답 구절: 2도 위로 + 마지막은 으뜸음으로 맺기
+                mot = [None if m is None else m + 2 for m in mot]
+                if bb % 2 == 1:
+                    mot[-2:] = [0, None]
+            unit = 2
+        else:
+            mot = motif_b[(bb % 2) * 4:(bb % 2) * 4 + 4]
+            unit = 4
+        if not (sec == 0 and bb == half - 1 and not menu):   # A 부분 마지막 마디는 드럼 필을 위해 비워 둔다
+            for k, m in enumerate(mot):
+                if m is None:
+                    continue
+                ln = 1
+                while k + ln < len(mot) and mot[k + ln] is None and ln < 3:
+                    ln += 1
+                n_len = s16 * unit * ln * 0.92
+                mv = (0.062 if menu else 0.036) * (1.15 if unit == 4 else 1.0)
+                s = note(mel_t, tone(chord + m, 2, chord), n_len, mv, 0.01, 0.12, 0.7)
+                o = b0 + int(k * unit * s16)
+                _add(mix, o, s)
+                _add(mix, o + int(spb * 0.75), s, 0.3)
+                _add(mix, o + int(spb * 1.5), s, 0.12)
+        # 드럼
+        fill = bb % 4 == 3
+        if bb == 0 or (not menu and bb == 4):
+            _add(mix, b0, crash, 1.0 if bb == 0 else 0.6)
+        for k in range(16):
+            o = b0 + int(k * s16)
+            if menu:
+                if k in (0, 10) or (sec == 1 and k == 7):
+                    _add(mix, o, kick, 0.85)
+                if k in (4, 12):
+                    _add(mix, o, snare_soft)
+                if k % 4 == 2:
+                    _add(mix, o, hat)
+                elif sec == 1 and k % 2 == 1:
+                    _add(mix, o, hat, 0.45)
+            else:
+                if sec == 0:
+                    if k % 4 == 0 or (fill and k in (14, 15)):
+                        _add(mix, o, kick)
+                else:
+                    if k in kick_b or (fill and k in (14, 15)):
+                        _add(mix, o, kick)
+                if k in (4, 12) or (fill and k in (13, 14, 15)):
+                    _add(mix, o, snare)
+                elif fill and k in (10, 11):
+                    _add(mix, o, snare, 0.5)
+                if sec == 1 and k % 4 == 2:
+                    _add(mix, o, ohat)
+                elif k % 2 == 1:
+                    _add(mix, o, hat)
+                elif r() < 0.25:
+                    _add(mix, o, hat, 0.7)
+    # 정규화 + 부드러운 포화 (작은 소리를 조금 키워서 꽉 찬 느낌)
+    peak = max(1e-6, max(mix), -min(mix))
+    inv = 1.0 / peak
+    c1 = 32767 * 0.9 * 1.5 * inv
+    c3 = 32767 * 0.9 * 0.5 * inv * inv * inv
+    return array.array('h', [int(x * (c1 - c3 * x * x)) for x in mix])
+
+
+def music_seed(ref):
+    """맵 -> 레이스 곡 번호 (같은 맵은 같은 곡)"""
+    if isinstance(ref, dict):
+        return cmap_key(ref) % MUSIC_STYLES
+    return int(ref) % MUSIC_STYLES
 
 
 
@@ -7759,10 +8170,11 @@ class UI(object):
         surf.blit(s, (r.centerx - s.get_width() // 2, r.centery - s.get_height() // 2))
         return enabled and self.tapped(rect)
 
-    def stepper(self, surf, rect, label, value, lo=None, hi=None):
-        """[라벨      ◀  값  ▶]  -> -1 / 0 / +1"""
+    def stepper(self, surf, rect, label, value, lo=None, hi=None, shown=None):
+        """[라벨      ◀  값  ▶]  -> -1 / 0 / +1   (shown: 값 대신 보여줄 글자, 예: '80%')"""
         u = self.u
-        self.text(surf, label, rect.x, rect.centery - 11 * u, 22 * u, (210, 220, 245))
+        ls = min(22 * u, rect.h * 0.62)
+        self.text(surf, label, rect.x, rect.centery - ls * 0.5, ls, (210, 220, 245))
         bw = rect.h
         res = 0
         lb = pygame.Rect(rect.right - bw * 3.4, rect.y, bw, rect.h)
@@ -7771,7 +8183,13 @@ class UI(object):
             res = -1
         if self.button(surf, rb, '>', 'normal', enabled=(hi is None or value < hi)):
             res = 1
-        self.text(surf, str(value), (lb.right + rb.x) // 2, rect.centery - 13 * u, 26 * u, (255, 220, 120), 'c')
+        txt = str(value) if shown is None else shown
+        vs = min(26 * u, rect.h * 0.7)
+        room = rb.x - lb.right - 6
+        tw = self.render(txt, vs, (255, 220, 120)).get_width()
+        if tw > room > 0:
+            vs = vs * room / float(tw)            # 칸보다 길면 글자를 줄인다
+        self.text(surf, txt, (lb.right + rb.x) // 2, rect.centery - vs * 0.5, vs, (255, 220, 120), 'c')
         return res
 
 
@@ -8074,11 +8492,12 @@ def draw_hud(app, surf, race, dt):
     draw_minimap(ui, surf, app.mini[0], app.mini[1], race, int(mx), int(my))
     ui.text(surf, map_title(race.map_id, LANG), sw - 14 * u, my + ms + 2 * u, 15 * u, (215, 225, 250), 'r')
     # 속도계
-    kmh = int(sim.speed * 3.6)
+    mph = app.profile['units'] == 'mph'
+    kmh = int(sim.speed * (2.23694 if mph else 3.6))
     cx = int(sw * 0.70) if sw > sh else sw // 2 + int(sw * 0.18)
     by = sh - int(app.touch.r * 1.0) if app.touch.btn else sh - 90 * u
     ui.text(surf, str(kmh), cx, by - 64 * u, 70 * u, (255, 255, 255), 'r')
-    ui.text(surf, 'km/h', cx + 6 * u, by - 36 * u, 24 * u, (200, 215, 245))
+    ui.text(surf, 'mph' if mph else 'km/h', cx + 6 * u, by - 36 * u, 24 * u, (200, 215, 245))
     bw = int(220 * u)
     pygame.draw.rect(surf, (0, 0, 0), (cx - bw, by + 4 * u, bw, 10 * u), border_radius=5)
     ratio = clamp(sim.speed / sim.stats['max_speed'], 0, 1.0)
@@ -8306,9 +8725,10 @@ class ScreenFx(object):
             surf.blit(self.veil, (0, 0))
             self.flash = max(0.0, self.flash - dt)
 
-
 # ============================================================================
-#  [폰] 사운드: 파일 없이 코드로 합성 (엔진/드리프트/효과음)
+#  [폰] 사운드: 파일 없이 코드로 합성 (엔진/드리프트/효과음 + 배경음악)
+#  채널 0 = 엔진, 1 = 드리프트, 2 = 배경음악 (예약해서 효과음이 뺏지 않게)
+#  볼륨: 전체 x (효과음 / 엔진 / 음악) - 설정 화면에서 조절
 # ============================================================================
 class Sfx(object):
     RATE = 22050
@@ -8320,19 +8740,53 @@ class Sfx(object):
         self.eng = []
         self.band = -1
         self.drift_on = False
+        self.vol = dict(master=1.0, sfx=1.0, engine=0.8, music=0.5)
+        self.music_on = True
+        self.music_key = None          # 지금 들려줘야 할 곡
+        self.cur_key = None            # 지금 채널에서 나오는 곡
+        self.music_cache = {}          # 곡 -> Sound (최근 2곡만)
+        self.raw_ready = {}            # 뒤에서 다 만든 곡 (아직 Sound 로 안 바꾼 것)
+        self.gen_busy = False
+        self.raw_ok = True
+        self.stereo = False
         try:
             if not pygame.mixer.get_init():
                 pygame.mixer.init(self.RATE, -16, 1, 512)
-            self.rate = pygame.mixer.get_init()[0]
-            self.ok = True
+            fmt = pygame.mixer.get_init()
+            self.rate = fmt[0]
+            self.stereo = fmt[2] >= 2
+            self.raw_ok = fmt[1] == -16 and fmt[2] in (1, 2)   # 16bit 가 아니면 WAV 로 넘겨서 pygame 이 변환
+            if pygame.mixer.get_num_channels() < 8:
+                pygame.mixer.set_num_channels(8)
+            pygame.mixer.set_reserved(3)
             self.eng_ch = pygame.mixer.Channel(0)
             self.drift_ch = pygame.mixer.Channel(1)
+            self.mus_ch = pygame.mixer.Channel(2)
+            self.ok = True
             self._build()
         except Exception:
             self.ok = False
 
-    def _mk(self, samples):
-        return pygame.mixer.Sound(buffer=samples.tobytes())
+    def _mk(self, samples, rate=None):
+        """모노 16bit 샘플 -> Sound. 장치가 스테레오면 두 채널로 복사, 형식/빠르기가 다르면 WAV 로 넘겨서 변환"""
+        rate = rate or self.rate
+        if self.raw_ok and rate == self.rate:
+            if self.stereo:
+                st = array.array('h', bytes(4 * len(samples)))
+                st[0::2] = samples
+                st[1::2] = samples
+                samples = st
+            return pygame.mixer.Sound(buffer=samples.tobytes())
+        import io
+        import wave
+        bio = io.BytesIO()
+        w = wave.open(bio, 'wb')
+        w.setnchannels(1)
+        w.setsampwidth(2)
+        w.setframerate(int(rate))
+        w.writeframes(samples.tobytes())
+        w.close()
+        return pygame.mixer.Sound(file=io.BytesIO(bio.getvalue()))
 
     def _tone(self, freq, ms, vol=0.35, wave='sine', slide=1.0, decay=True):
         n = int(self.rate * ms / 1000.0)
@@ -8387,7 +8841,6 @@ class Sfx(object):
         for i, f0 in enumerate((58.0, 74.0, 95.0, 122.0, 156.0, 200.0)):
             dur = 0.2
             cycles = max(1, int(round(f0 * dur)))
-            f = cycles / dur
             n = int(self.rate * dur)
             buf = array.array('h')
             for k in range(n):
@@ -8397,16 +8850,107 @@ class Sfx(object):
                 buf.append(int(x * 0.2 * 32767))
             self.eng.append(self._mk(buf))
 
+    # ---- 볼륨 / 켜고 끄기 ----
+    def set_volumes(self, master, sfx, engine, music, music_on=True):
+        self.vol = dict(master=clamp(master, 0, 1), sfx=clamp(sfx, 0, 1), engine=clamp(engine, 0, 1), music=clamp(music, 0, 1))
+        on = bool(music_on)
+        if on != self.music_on:
+            self.music_on = on
+            if not on:
+                self._stop_music()
+        if self.ok:
+            try:
+                self.mus_ch.set_volume(self._mv())
+            except Exception:
+                pass
+
+    def set_enabled(self, flag):
+        self.enabled = bool(flag)
+        if not self.enabled:
+            self.silence()
+            self._stop_music()
+
+    def _mv(self):
+        return 0.6 * self.vol['master'] * self.vol['music']
+
     def play(self, name, vol=1.0):
         if not (self.ok and self.enabled):
             return
         s = self.sounds.get(name)
         if s is not None:
             try:
-                s.set_volume(vol)
+                s.set_volume(clamp(vol * self.vol['master'] * self.vol['sfx'], 0.0, 1.0))
                 s.play()
             except Exception:
                 pass
+
+    # ---- 배경음악: 처음 듣는 곡은 뒤에서 만들고(게임이 멈추지 않게), 다 되면 tick() 에서 틀기 ----
+    def music(self, kind, seed=0):
+        if not self.ok:
+            return
+        key = (kind, int(seed))
+        if key == self.music_key:
+            return
+        self.music_key = key
+        if self.cur_key is not None and self.cur_key != key:
+            self._stop_music(300)
+
+    def _stop_music(self, fade=0):
+        self.cur_key = None
+        if not self.ok:
+            return
+        try:
+            if fade:
+                self.mus_ch.fadeout(fade)
+            else:
+                self.mus_ch.stop()
+        except Exception:
+            pass
+
+    def _gen(self):
+        try:
+            while True:
+                key = self.music_key
+                if key is None or key in self.music_cache or key in self.raw_ready:
+                    break
+                buf = make_music(key[0], key[1], MUSIC_RATE)
+                self.raw_ready = {key: buf}           # 가장 최근에 원한 곡만 남긴다
+        except Exception:
+            pass
+        self.gen_busy = False
+
+    def tick(self):
+        """매 프레임 (메인 스레드): 곡이 준비됐으면 틀기"""
+        if not (self.ok and self.enabled and self.music_on):
+            return
+        key = self.music_key
+        if key is None or key == self.cur_key:
+            return
+        snd = self.music_cache.get(key)
+        if snd is None:
+            buf = self.raw_ready.pop(key, None)
+            if buf is None:
+                if not self.gen_busy:
+                    self.gen_busy = True
+                    threading.Thread(target=self._gen, daemon=True).start()
+                return
+            try:
+                snd = self._mk(buf, MUSIC_RATE)
+            except Exception:
+                self.music_key = None
+                return
+            for k in list(self.music_cache.keys()):
+                if len(self.music_cache) < 2:
+                    break
+                del self.music_cache[k]
+            self.music_cache[key] = snd
+        try:
+            self.mus_ch.set_volume(self._mv())
+            self.mus_ch.play(snd, loops=-1, fade_ms=700)
+            self.mus_ch.set_volume(self._mv())
+            self.cur_key = key
+        except Exception:
+            self.cur_key = key
 
     def engine(self, ratio, throttle, boosting, drifting, offroad):
         if not (self.ok and self.enabled):
@@ -8416,7 +8960,7 @@ class Sfx(object):
             if band != self.band:
                 self.band = band
                 self.eng_ch.play(self.eng[band], loops=-1)
-            self.eng_ch.set_volume(0.22 + 0.2 * throttle)
+            self.eng_ch.set_volume((0.22 + 0.2 * throttle) * self.vol['master'] * self.vol['engine'])
             want = (drifting or (offroad and ratio > 0.2))
             if want and not self.drift_on:
                 self.drift_ch.play(self.sounds['drift'], loops=-1)
@@ -8425,7 +8969,7 @@ class Sfx(object):
                 self.drift_ch.stop()
                 self.drift_on = False
             if self.drift_on:
-                self.drift_ch.set_volume(0.6 if drifting else 0.25)
+                self.drift_ch.set_volume((0.6 if drifting else 0.25) * self.vol['master'] * self.vol['sfx'])
         except Exception:
             pass
 
@@ -8509,6 +9053,8 @@ class App(object):
         self.brake_held = False
         self.item_rects = []
         self.cam = ChaseCam()
+        self.set_tab = 'view'             # 설정 화면 탭: 'view' / 'sound' / 'game'
+        self.clear_ask = 0.0              # '기록 지우기' 두 번 누르기 확인 시간
         self.touch = TouchControls()
         self.touch.layout(self.W, self.H, self.profile['auto_gas'])
         self.clock = pygame.time.Clock()
@@ -8539,6 +9085,8 @@ class App(object):
         self.store = MapStore()           # 내가 만든 맵 목록
         self.maker = PhoneMapMaker(self)  # 맵 만들기 화면
         self.test_map = None              # 편집기에서 '시험 주행' 중인 맵
+        self.apply_prefs()
+        self.sfx.music('menu', 0)
 
     # ------------------------------------------------------------------ 공통 도우미
     @property
@@ -8570,6 +9118,12 @@ class App(object):
         self.mini = None
         self.show_map = None
 
+    def apply_prefs(self):
+        """설정값을 소리(볼륨/음악)와 카메라 거리에 반영"""
+        p = self.profile
+        self.sfx.set_volumes(p['vol_master'], p['vol_sfx'], p['vol_engine'], p['vol_music'], p['music'])
+        self.cam.k = CAM_K[int(clamp(p['cam_dist'], 0, 2))]
+
     def set_quality(self, q):
         self.profile['quality'] = q
         self.profile.save()
@@ -8579,6 +9133,10 @@ class App(object):
         self.scene = scene
         self.err = ''
         self.sfx.play('click', 0.6)
+        self.sfx.music('menu', 0)
+        if scene == 'settings':
+            self.set_tab = 'view'
+            self.clear_ask = 0.0
         if scene == 'solo':
             self.sel_map = int(self.profile['map'])
         if scene == 'multi':
@@ -8642,10 +9200,8 @@ class App(object):
                     elif e.key == pygame.K_r and self.race:
                         self.race.respawn_local()
                     elif e.key == pygame.K_m:
-                        self.sfx.enabled = not self.sfx.enabled
+                        self.sfx.set_enabled(not self.sfx.enabled)
                         self.toast(T('소리 켬', 'Sound on') if self.sfx.enabled else T('소리 끔', 'Sound off'), 0.8)
-                        if not self.sfx.enabled:
-                            self.sfx.silence()
             elif e.type == pygame.KEYUP:
                 self.keys.discard(e.key)
             elif e.type == getattr(pygame, 'VIDEORESIZE', -1):
@@ -8723,10 +9279,23 @@ class App(object):
 
     def start_solo(self):
         p = self.profile
-        entries = solo_entries(p.display_name(), p['kart'], int(p['bots']))
+        ta = p['mode'] == 'time'                  # 타임 어택: 혼자, 아이템 없이 기록 도전
+        entries = solo_entries(p.display_name(), p['kart'], 0 if ta else int(p['bots']))
         ref = self.solo_map()
         self.start_race(ref, int(p['laps']) if self.test_map is None else int(ref['laps']), entries, False, True,
                         5.0 if self.test_map is None else 3.0, p['mode'] == 'item')
+        if ta and self.race is not None:
+            self.toast(self.rec_text(ref, self.race.laps), 5.0, (255, 230, 130))
+
+    def rec_text(self, ref, laps):
+        r = rec_get(self.profile, ref)
+        parts = []
+        if isinstance(r.get('lap'), (int, float)):
+            parts.append(T('최고 랩 ', 'Best lap ') + fmt_time(r['lap']))
+        rk = r.get('race%d' % int(laps))
+        if isinstance(rk, (int, float)):
+            parts.append(T('%d바퀴 최고 ' % int(laps), 'Best %d laps ' % int(laps)) + fmt_time(rk))
+        return '   '.join(parts) if parts else T('아직 기록 없음', 'No records yet')
 
     def use_item(self, slot):
         if self.race is not None and self.race.items is not None and not (self.paused and not self.race.multi):
@@ -8734,6 +9303,7 @@ class App(object):
 
     def start_race(self, map_id, laps, entries, multi, is_host, countdown, items=False):
         self.loading(T('맵 생성 중…', 'Building map…') + ' ' + map_title(map_id, LANG))
+        self.sfx.music('race', music_seed(map_id))
         self.race = Race(map_id, laps, entries, multi=multi, is_host=is_host, countdown=countdown, net=self.session.net if multi else None, items=items)
         self.hud_top = 0
         self.renderer.set_track(self.race.track)
@@ -8793,7 +9363,11 @@ class App(object):
                 self.sfx.play('go')
                 self.toast('GO!', 1.0, (255, 255, 255), True)
             elif kind == 'lap':
-                self.toast('FINAL LAP!' if ev[2] else 'LAP %d' % ev[1], 1.6, (255, 220, 90), True)
+                self.toast('FINAL LAP!' if ev[2] else 'LAP %d/%d' % (ev[1], race.laps), 1.6, (255, 220, 90), True)
+                if race.lap_times:
+                    last = race.lap_times[-1]
+                    best = len(race.lap_times) > 1 and last <= min(race.lap_times)
+                    self.toast((u'\u2605 ' if best else '') + fmt_time(last), 2.0, (255, 215, 90) if best else (215, 228, 255))
                 self.sfx.play('lap')
             elif kind == 'finish':
                 self.toast('FINISH!', 3.0, (255, 255, 255), True)
@@ -8953,7 +9527,7 @@ class App(object):
         self.renderer.update_particles(dt if not self.paused else 0.0)
         cp = self.cam.update(dt, loc, sim.stats['max_speed'])
         self.renderer.shake = max(0.0, self.renderer.shake - dt * 2.2)
-        sh = self.renderer.shake * 0.25 + (0.05 if loc.boosting else 0.0)
+        sh = (self.renderer.shake * 0.25 + (0.05 if loc.boosting else 0.0)) if self.profile['shake'] else 0.0
         if sh > 0.01:
             cp = (cp[0] + (_random.random() - 0.5) * sh, cp[1] + (_random.random() - 0.5) * sh, cp[2] + (_random.random() - 0.5) * sh, cp[3], cp[4])
         tr = race.track
@@ -9045,9 +9619,34 @@ class App(object):
         r = R((self.W - pw) // 2, (self.H - ph) // 2, pw, ph)
         ui.panel(surf, r, 235)
         ui.text(surf, T('결과', 'Results'), r.centerx, r.y + 12 * u, 36 * u, (255, 215, 90), 'c')
+        # 기록 (아이템전/시험 주행은 저장 안 함)
+        if race.local is not None and race.local.finished and not getattr(race, '_rec_done', False):
+            race._rec_done = True
+            if race.items is None and self.test_map is None:
+                race._rec = rec_submit(self.profile, race.map_id, race.laps, race.lap_times, race.local.finish_time)
+        rec = getattr(race, '_rec', None)
+        if race.lap_times:
+            nl = bool(rec and rec[0])
+            line = T('이번 최고 랩 ', 'Best lap ') + fmt_time(min(race.lap_times))
+            if nl:
+                line += T('  ★ 랩 신기록!', '  ★ NEW LAP RECORD!')
+            if rec and rec[1]:
+                line += T('  ★ 완주 신기록!', '  ★ NEW RACE RECORD!')
+            ui.text(surf, line, r.centerx, r.y + 56 * u, 20 * u, (255, 215, 90) if (nl or (rec and rec[1])) else (205, 220, 250), 'c')
+        if race.items is not None:
+            sub = T('아이템전 기록은 저장하지 않아요 (스피드전/타임 어택에서 도전!)', 'Item battles do not set records')
+        elif self.test_map is not None:
+            sub = T('시험 주행 기록은 저장하지 않아요', 'Test drives do not set records')
+        else:
+            sub = map_title(race.map_id, LANG) + '   ' + self.rec_text(race.map_id, race.laps)
+        sz = 17 * u
+        tw_ = ui.render(sub, sz, (170, 190, 230)).get_width()
+        if tw_ > r.w - 30 * u:
+            sz = sz * (r.w - 30 * u) / float(tw_)
+        ui.text(surf, sub, r.centerx, r.y + 82 * u, sz, (170, 190, 230), 'c')
         rank = race.ranking()
-        rh = min(34 * u, (ph - 150 * u) / max(1, len(rank)))
-        y = r.y + 62 * u
+        rh = min(34 * u, (ph - 200 * u) / max(1, len(rank)))
+        y = r.y + 110 * u
         for i, rc in enumerate(rank):
             row = R(r.x + 18 * u, y, r.w - 36 * u, rh - 3 * u)
             me = rc is race.local
@@ -9282,19 +9881,28 @@ class App(object):
         d = ui.stepper(surf, R(x, y + 52 * u, w, 44 * u), T('바퀴 수', 'Laps'), int(self.profile['laps']), 1, 10)
         if d:
             self.profile['laps'] = int(self.profile['laps']) + d
-        d = ui.stepper(surf, R(x, y + 108 * u, w, 44 * u), T('AI 상대', 'AI rivals'), int(self.profile['bots']), 0, 11)
-        if d:
-            self.profile['bots'] = int(self.profile['bots']) + d
-        half = (w - 10 * u) / 2.0
-        item_mode = self.profile['mode'] == 'item'
-        if ui.button(surf, R(x, y + 160 * u, half, 40 * u), T('스피드전', 'Speed'), 'chip' if item_mode else 'chipon', size=19 * u):
-            self.profile['mode'] = 'speed'
-            self.profile.save()
-        if ui.button(surf, R(x + half + 10 * u, y + 160 * u, half, 40 * u), T('아이템전', 'Items'), 'chipon' if item_mode else 'chip', size=19 * u):
-            self.profile['mode'] = 'item'
-            self.profile.save()
-        ui.text(surf, '%s #%d' % (kart_name(self.profile['kart'], LANG), self.profile['kart'] + 1), x, y + 210 * u, 18 * u, (190, 205, 240))
+        mode = self.profile['mode'] if self.profile['mode'] in ('speed', 'item', 'time') else 'item'
+        if mode == 'time':
+            ui.text(surf, T('AI 상대: 없음 (혼자 기록 도전)', 'AI rivals: none (solo run)'), x, y + 118 * u, 19 * u, (190, 205, 240))
+        else:
+            d = ui.stepper(surf, R(x, y + 108 * u, w, 44 * u), T('AI 상대', 'AI rivals'), int(self.profile['bots']), 0, 11)
+            if d:
+                self.profile['bots'] = int(self.profile['bots']) + d
+        third = (w - 16 * u) / 3.0
+        for i, (key, lab) in enumerate((('speed', T('스피드전', 'Speed')), ('item', T('아이템전', 'Items')), ('time', T('타임 어택', 'Time attack')))):
+            if ui.button(surf, R(x + i * (third + 8 * u), y + 160 * u, third, 40 * u), lab, 'chipon' if mode == key else 'chip', size=18 * u):
+                self.profile['mode'] = key
+                self.profile.save()
+        ref = self.solo_map() if self.profile['map_src'] == 'custom' else int(self.sel_map)
+        rt = self.rec_text(ref, int(self.profile['laps']))
+        sz = 17 * u
+        tw_ = ui.render(rt, sz, (255, 225, 140)).get_width()
+        if tw_ > w:
+            sz = sz * w / float(tw_)
+        ui.text(surf, rt, x, y + 210 * u, sz, (255, 225, 140))
         bh = min(70 * u, rr.h * 0.2)
+        if y + 262 * u < rr.bottom - 14 * u - bh * 2 - 10 * u:
+            ui.text(surf, '%s #%d' % (kart_name(self.profile['kart'], LANG), self.profile['kart'] + 1), x, y + 236 * u, 18 * u, (190, 205, 240))
         if ui.button(surf, R(x, rr.bottom - 14 * u - bh * 2 - 10 * u, w, bh), T('출발!', 'START!'), 'primary', size=bh * 0.5):
             self.profile['map'] = self.sel_map
             self.profile.save()
@@ -9384,66 +9992,134 @@ class App(object):
 
     # ------------------------------------------------------------------ 설정
     def scene_settings(self, dt):
-        global LANG
         ui = self.ui
         u = ui.u
         surf = self.screen
-        self.draw_show(dt, self.profile['kart'], shift=0.0)
+        p = self.profile
+        self.draw_show(dt, p['kart'], shift=0.0)
         pw = min(self.W - 28 * u, 620 * u)
         r = R((self.W - pw) / 2, 14 * u, pw, self.H - 28 * u)
         ui.panel(surf, r, 215)
-        kk = clamp(r.h / (700.0 * u), 0.6, 1.0)          # 작은 화면에서는 세로 간격을 줄여 모두 들어가게
+        kk = clamp(r.h / (660.0 * u), 0.6, 1.0)          # 작은 화면에서는 세로 간격을 줄여 모두 들어가게
         x, y, w = r.x + 18 * u, r.y + 12 * u, r.w - 36 * u
         bh = 44 * u * kk
-        cw = (w - 20 * u) / 3.0
         ui.text(surf, T('설정', 'Settings'), x, y, 32 * u * kk)
-        y += 50 * u * kk
+        ui.text(surf, 'TURBO KART 3D  v' + VERSION, r.right - 18 * u, y + 10 * u * kk, 17 * u * kk, (150, 165, 205), 'r')
+        y += 48 * u * kk
+        tabs = (('view', T('화면·조작', 'Display')), ('sound', T('소리', 'Sound')), ('game', T('게임', 'Game')))
+        tw = (w - 16 * u) / 3.0
+        for i, (key, lab) in enumerate(tabs):
+            if ui.button(surf, R(x + i * (tw + 8 * u), y, tw, bh), lab, 'chipon' if self.set_tab == key else 'chip', size=bh * 0.42):
+                self.set_tab = key
+                self.clear_ask = 0.0
+        y += bh + 18 * u * kk
 
         def chips(label, names, cur, on_pick):
             nonlocal y
             ui.text(surf, label, x, y, 21 * u * kk, (210, 220, 245))
             y += 27 * u * kk
+            n = len(names)
+            cw = (w - 10 * u * (n - 1)) / float(n)
             for i, nm in enumerate(names):
                 if ui.button(surf, R(x + i * (cw + 10 * u), y, cw, bh), nm, 'chipon' if cur == i else 'chip', size=bh * 0.42):
                     on_pick(i)
             y += bh + 12 * u * kk
+
+        def toggle(label, on, flip):
+            nonlocal y
+            if ui.button(surf, R(x, y, w, bh), '%s :  %s' % (label, 'ON' if on else 'OFF'), 'good' if on else 'normal', size=bh * 0.42):
+                flip()
+                p.save()
+            y += bh + 10 * u * kk
+
+        def flip_key(key, after=None):
+            def f():
+                p[key] = not bool(p[key])
+                if after is not None:
+                    after()
+            return f
 
         def pick_quality(i):
             self.set_quality(i)
             self.show_map = None
 
         def pick_steer(i):
-            self.profile['steer_resp'] = i
-            self.profile.save()
-            self.toast(T('조향 반응을 바꿨어요', 'Steering changed'), 0.8)
+            p['steer_resp'] = i
+            p.save()
+
+        def pick_cam(i):
+            p['cam_dist'] = i
+            self.apply_prefs()
+            p.save()
 
         def pick_lang(i):
             global LANG
             code = ('auto', 'ko', 'en')[i]
-            self.profile['lang'] = code
+            p['lang'] = code
             LANG = ('ko' if self.font_path else 'en') if code == 'auto' else code
-            self.profile.save()
-        chips(T('그래픽 품질', 'Graphics'), [T('낮음', 'Low'), T('중간', 'Medium'), T('높음', 'High')], self.renderer.q, pick_quality)
-        y -= 6 * u * kk
-        ui.text(surf, T('높음 = 디테일을 줄이지 않는 원래 그래픽 · 낮음/중간 = 먼 곳 디테일을 줄여서 더 빠르게',
-                        'High = full original detail · Low/Medium = less distant detail for speed'), x, y, 16 * u * kk, (170, 190, 230))
-        y += 24 * u * kk
-        chips(T('조향 반응 (키보드/버튼)', 'Steering response (keys/buttons)'), [T('부드럽게', 'Smooth'), T('보통', 'Normal'), T('빠르게', 'Quick')], int(self.profile['steer_resp']), pick_steer)
-        for key, lab in (('auto_gas', T('자동 가속 (터치)', 'Auto gas (touch)')), ('sound', T('소리', 'Sound'))):
-            on = bool(self.profile[key])
-            if ui.button(surf, R(x, y, w, bh), '%s :  %s' % (lab, 'ON' if on else 'OFF'), 'good' if on else 'normal', size=bh * 0.42):
-                self.profile[key] = not on
-                if key == 'sound':
-                    self.sfx.enabled = not on
-                self.touch.layout(self.W, self.H, self.profile['auto_gas'])
-                self.profile.save()
-            y += bh + 10 * u * kk
-        cur_lang = ('auto', 'ko', 'en').index(self.profile['lang']) if self.profile['lang'] in ('auto', 'ko', 'en') else 0
-        chips(T('언어 / Language', 'Language'), ['Auto', '한국어' if self.font_path else 'Korean', 'English'], cur_lang, pick_lang)
-        if ui.button(surf, R(x, y, w, bh), 'FPS :  %s' % ('ON' if self.show_fps else 'OFF'), 'good' if self.show_fps else 'normal', size=bh * 0.42):
+            p.save()
+
+        def pick_units(i):
+            p['units'] = ('kmh', 'mph')[i]
+            p.save()
+
+        def flip_fps():
             self.show_fps = not self.show_fps
+        tab = self.set_tab
+        if tab == 'view':
+            chips(T('그래픽 품질', 'Graphics'), [T('낮음', 'Low'), T('중간', 'Medium'), T('높음', 'High')], self.renderer.q, pick_quality)
+            y -= 6 * u * kk
+            ui.text(surf, T('높음 = 디테일을 줄이지 않는 원래 그래픽 · 낮음/중간 = 먼 곳 디테일을 줄여서 더 빠르게',
+                            'High = full original detail · Low/Medium = less distant detail for speed'), x, y, 16 * u * kk, (170, 190, 230))
+            y += 26 * u * kk
+            chips(T('조향 반응 (키보드/버튼)', 'Steering response (keys/buttons)'), [T('부드럽게', 'Smooth'), T('보통', 'Normal'), T('빠르게', 'Quick')],
+                  int(p['steer_resp']), pick_steer)
+            chips(T('카메라 거리', 'Camera distance'), [T('가까이', 'Near'), T('보통', 'Normal'), T('멀리', 'Far')], int(clamp(p['cam_dist'], 0, 2)), pick_cam)
+            toggle(T('자동 가속 (터치)', 'Auto gas (touch)'), bool(p['auto_gas']),
+                   flip_key('auto_gas', lambda: self.touch.layout(self.W, self.H, p['auto_gas'])))
+            toggle(T('화면 흔들림', 'Camera shake'), bool(p['shake']), flip_key('shake'))
+            toggle('FPS', self.show_fps, flip_fps)
+        elif tab == 'sound':
+            toggle(T('소리 (전체)', 'Sound (all)'), bool(p['sound']), flip_key('sound', lambda: self.sfx.set_enabled(p['sound'])))
+            toggle(T('배경음악', 'Music'), bool(p['music']), flip_key('music', self.apply_prefs))
+            for key, lab in (('vol_master', T('전체 볼륨', 'Master volume')), ('vol_sfx', T('효과음', 'Effects')),
+                             ('vol_engine', T('엔진 소리', 'Engine')), ('vol_music', T('음악', 'Music'))):
+                v = int(round(clamp(p[key], 0, 1) * 10))
+                d = ui.stepper(surf, R(x, y, w, bh), lab, v, 0, 10, '%d%%' % (v * 10))
+                if d:
+                    p[key] = clamp(v + d, 0, 10) / 10.0
+                    self.apply_prefs()
+                    if key != 'vol_music':
+                        self.sfx.play('lap' if key != 'vol_engine' else 'bump', 0.8)     # 바뀐 크기를 바로 들려주기
+                    p.save()
+                y += bh + 10 * u * kk
+            ui.text(surf, T('음악은 맵마다 다른 곡이 나와요 (16곡)', 'Each map has its own track (16 tracks)'), x, y, 16 * u * kk, (170, 190, 230))
+        else:
+            cur_lang = ('auto', 'ko', 'en').index(p['lang']) if p['lang'] in ('auto', 'ko', 'en') else 0
+            chips(T('언어 / Language', 'Language'), ['Auto', '한국어' if self.font_path else 'Korean', 'English'], cur_lang, pick_lang)
+            chips(T('속도 단위', 'Speed units'), ['km/h', 'mph'], 1 if p['units'] == 'mph' else 0, pick_units)
+            n = len(p['records']) if isinstance(p['records'], dict) else 0
+            ask = self.t < self.clear_ask
+            lab = T('정말 지울까요? 한 번 더 누르면 지워져요', 'Sure? Tap again to clear') if ask else T('기록 지우기 (맵 %d개)' % n, 'Clear records (%d maps)' % n)
+            if ui.button(surf, R(x, y, w, bh), lab, 'danger' if ask else 'normal', size=bh * 0.42, enabled=(n > 0 or ask)):
+                if ask:
+                    p['records'] = {}
+                    p.save()
+                    self.clear_ask = 0.0
+                else:
+                    self.clear_ask = self.t + 3.0
+            y += bh + 14 * u * kk
+            for line in (T('맵 1000개 · 카트 100,000종 · 아이템 100종 · 맵 만들기 · WiFi 멀티 (폰↔PC)',
+                           '1000 maps · 100,000 karts · 100 items · map maker · WiFi multiplayer (phone↔PC)'),
+                         T('기록: 스피드전/타임 어택에서 맵마다 최고 랩·완주 시간을 저장해요', 'Records: best lap & race time per map (speed / time attack)')):
+                sz = 16 * u * kk
+                lw = ui.render(line, sz, (170, 190, 230)).get_width()
+                if lw > w:
+                    sz = sz * w / float(lw)
+                ui.text(surf, line, x, y, sz, (170, 190, 230))
+                y += 24 * u * kk
         if ui.button(surf, R(x, r.bottom - 12 * u - 50 * u * kk, w, 50 * u * kk), T('완료', 'Done'), 'primary', size=22 * u * kk):
-            self.profile.save()
+            p.save()
             self.go('menu')
 
     # ------------------------------------------------------------------ 멀티플레이
@@ -9657,6 +10333,7 @@ class App(object):
             res = self.kb.draw(self.ui, self.screen, self.W, self.H, dt)
             if res:
                 self.close_kb(res)
+        self.sfx.tick()
         pygame.display.flip()
 
     def run(self):

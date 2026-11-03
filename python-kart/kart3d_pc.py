@@ -29,6 +29,12 @@ import tempfile
 import subprocess
 import random as _random
 
+for _st in (sys.stdout, sys.stderr):      # 콘솔이 한글을 못 쓰는 환경(ASCII)에서도 글자 출력 때문에 멈추지 않게
+    try:
+        _st.reconfigure(errors='backslashreplace')
+    except Exception:
+        pass
+
 
 def _is_android():
     return ('ANDROID_ARGUMENT' in os.environ) or ('ANDROID_ROOT' in os.environ and os.path.exists('/system/build.prop'))
@@ -43,6 +49,16 @@ def _wait_key():
         pass
 
 
+def _error_box(text):
+    """콘솔 없는 설치판(윈도우)에서 오류를 창으로 보여준다"""
+    if getattr(sys, 'frozen', False) and sys.platform.startswith('win'):
+        try:
+            import ctypes
+            ctypes.windll.user32.MessageBoxW(None, text, 'TURBO KART 3D', 0x10)
+        except Exception:
+            pass
+
+
 def _crash_log(text):
     """오류 내용을 화면 + kart3d_error.txt 파일로 남긴다 (파일은 게임 파일과 같은 폴더)"""
     info = 'Python %s | %s | %s' % (sys.version.split()[0], sys.platform, sys.executable)
@@ -50,7 +66,14 @@ def _crash_log(text):
         base = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] else '.'
     except Exception:
         base = '.'
-    for d in (base, os.path.expanduser('~'), '.'):
+    dirs = [base, os.path.expanduser('~'), '.']
+    try:
+        sd = globals().get('save_dirs')            # 설치판이면 사용자 폴더가 먼저 (프로그램 폴더는 쓰기 금지일 수 있음)
+        if sd is not None:
+            dirs = [d or '.' for d in sd()] + dirs
+    except Exception:
+        pass
+    for d in dirs:
         try:
             path = os.path.join(d, 'kart3d_error.txt')
             with open(path, 'a', encoding='utf-8') as f:
@@ -224,8 +247,9 @@ import time
 import os
 import sys
 import queue
+import array
 
-VERSION = '1.1'
+VERSION = '1.2'
 MAP_COUNT = 1000
 KART_COUNT = 100000
 DEFAULT_PORT = 5555
@@ -2609,6 +2633,8 @@ class Race(object):
         self.auto_local = auto_local
         self.count_left = countdown
         self.items = ItemSystem(self) if items else None
+        self.lap_start = 0.0          # 내 카트의 이번 바퀴 시작 시각
+        self.lap_times = []           # 내 카트의 바퀴별 시간 (기록용)
 
     def ev(self, e):
         self._pend.append(e)
@@ -2682,6 +2708,7 @@ class Race(object):
                     sim.finished = True
                     self.finish_order.append(rc)
                     if rc.kind == 'local':
+                        self.lap_times.append(self.t - self.lap_start)
                         self.ev(('finish',))
                         if self.net is not None and self.multi:
                             self.net.send({'t': 'fin', 'time': round(rc.finish_time, 2)})
@@ -2690,6 +2717,8 @@ class Race(object):
                     self.ev(('sim', e))
                 lap = min(self.laps, sim.lap)
                 if lap > self.last_lap and running:
+                    self.lap_times.append(self.t - self.lap_start)
+                    self.lap_start = self.t
                     self.ev(('lap', lap, lap == self.laps))
                     self.last_lap = lap
         if items is not None:
@@ -3365,12 +3394,60 @@ def serve_forever(port=DEFAULT_PORT):
 # ----------------------------------------------------------------------------
 #  설정/프로필 저장 (JSON 파일, 실패해도 게임은 계속 동작)
 # ----------------------------------------------------------------------------
+def user_data_dir():
+    """설치판이 저장할 사용자 폴더 (Windows: %APPDATA%/TurboKart3D, macOS: Application Support, Linux: ~/.local/share)"""
+    try:
+        if sys.platform.startswith('win'):
+            base = os.environ.get('APPDATA') or os.path.expanduser('~')
+        elif sys.platform == 'darwin':
+            base = os.path.join(os.path.expanduser('~'), 'Library', 'Application Support')
+        else:
+            base = os.environ.get('XDG_DATA_HOME') or os.path.join(os.path.expanduser('~'), '.local', 'share')
+        d = os.path.join(base, 'TurboKart3D')
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        return d
+    except Exception:
+        return None
+
+
+def save_dirs():
+    """저장 파일을 찾을/쓸 폴더 순서. 스크립트로 실행하면 게임 파일 옆이 먼저,
+    설치판(스팀 등으로 묶은 실행 파일)은 프로그램 폴더가 쓰기 금지일 수 있어서 사용자 폴더가 먼저"""
+    out = []
+    if getattr(sys, 'frozen', False):
+        d = user_data_dir()
+        if d:
+            out.append(d)
+    try:
+        out.append(os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv and sys.argv[0] else __file__)))
+    except Exception:
+        pass
+    try:
+        out.append(os.path.expanduser('~'))
+    except Exception:
+        pass
+    out.append('')
+    seen = []
+    for d in out:
+        if d not in seen:
+            seen.append(d)
+    return seen
+
+
 class Profile(dict):
     DEFAULTS = {'name': '', 'kart': None, 'map': 1, 'laps': 3, 'bots': 7, 'quality': 1, 'auto_gas': True, 'sound': True,
                 'lang': 'auto', 'last_ip': '', 'port': DEFAULT_PORT, 'steer_mode': 'buttons', 'steer_resp': 1,
-                'mode': 'item',           # 'item' = 아이템전, 'speed' = 스피드전
+                'mode': 'item',           # 'item' = 아이템전, 'speed' = 스피드전, 'time' = 타임 어택(혼자, 기록 도전)
                 'map_src': 'builtin',     # 'builtin' = 기본 맵(1~1000), 'custom' = 내가 만든 맵
-                'cmap': ''}               # 고른 '내 맵' 의 uid
+                'cmap': '',               # 고른 '내 맵' 의 uid
+                # 소리 (0~1)
+                'vol_master': 1.0, 'vol_sfx': 1.0, 'vol_engine': 0.8, 'vol_music': 0.5, 'music': True,
+                # 게임/카메라
+                'units': 'kmh', 'shake': True, 'speed_fx': True, 'cam_dist': 1, 'records': {},
+                # PC 그래픽/화면 (폰은 'quality' 를 씀)
+                'gfx': 'high', 'msaa': 4, 'aniso': 8, 'view': 2, 'props_k': 1.0, 'fx_k': 1.0, 'weather_k': 1.0, 'shadows': True,
+                'display': 'window', 'res': '', 'vsync': True, 'fps_cap': 0, 'fov': 82}
 
     def __init__(self, filename='kart3d_profile.json'):
         dict.__init__(self)
@@ -3380,19 +3457,26 @@ class Profile(dict):
         self.load()
         if self['kart'] is None:
             self['kart'] = int(time.time() * 1000) % KART_COUNT
+        self['kart'] = int(self['kart']) % KART_COUNT
 
     def _candidates(self):
-        out = []
-        try:
-            out.append(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv and sys.argv[0] else __file__)), self.filename))
-        except Exception:
-            pass
-        try:
-            out.append(os.path.join(os.path.expanduser('~'), self.filename))
-        except Exception:
-            pass
-        out.append(self.filename)
-        return out
+        return [os.path.join(d, self.filename) if d else self.filename for d in save_dirs()]
+
+    _BAD = object()
+
+    @classmethod
+    def _fix(cls, default, v):
+        """저장 파일 값 검사: 기본값과 같은 종류면 (필요하면 고쳐서) 돌려주고, 아니면 _BAD (손으로 고친 파일 대비)"""
+        num = isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) < 1e9
+        if default is None or (isinstance(default, int) and not isinstance(default, bool)):
+            if default is None and v is None:
+                return None
+            return int(v) if num else cls._BAD
+        if isinstance(default, float):
+            return float(v) if num else cls._BAD
+        if isinstance(default, bool):
+            return v if isinstance(v, bool) else cls._BAD
+        return v if isinstance(v, type(default)) else cls._BAD
 
     def load(self):
         for p in self._candidates():
@@ -3403,7 +3487,9 @@ class Profile(dict):
                     if isinstance(data, dict):
                         for k, v in data.items():
                             if k in self.DEFAULTS:
-                                self[k] = v
+                                v = self._fix(self.DEFAULTS[k], v)
+                                if v is not self._BAD:
+                                    self[k] = v
                         self.path = p
                         return
             except Exception:
@@ -3425,6 +3511,50 @@ class Profile(dict):
     def display_name(self):
         n = str(self['name']).strip()
         return n if n else 'Racer%d' % (1 + int(self['kart']) % 99)
+
+
+# ---- 기록 (맵마다 최고 랩 / 바퀴 수별 최고 완주 시간) ----
+def rec_key(ref):
+    if isinstance(ref, dict):
+        return 'c%08x' % cmap_key(ref)
+    return 'm%d' % int(ref)
+
+
+def rec_get(profile, ref):
+    recs = profile.get('records')
+    r = recs.get(rec_key(ref)) if isinstance(recs, dict) else None
+    return r if isinstance(r, dict) else {}
+
+
+def rec_submit(profile, ref, laps, lap_times, race_time):
+    """레이스 기록 저장. 반환 (새 최고 랩, 새 최고 완주) - 아이템전 기록은 넣지 않는다 (공정하게)"""
+    recs = profile.get('records')
+    if not isinstance(recs, dict):
+        recs = {}
+    key = rec_key(ref)
+    r = recs.get(key)
+    if not isinstance(r, dict):
+        r = {}
+    new_lap = new_race = False
+    good = [t for t in (lap_times or []) if t > 2.0]
+    if good:
+        bl = min(good)
+        if not isinstance(r.get('lap'), (int, float)) or bl < r['lap']:
+            r['lap'] = round(bl, 3)
+            new_lap = True
+    if race_time is not None and race_time > 2.0:
+        rk = 'race%d' % int(laps)
+        if not isinstance(r.get(rk), (int, float)) or race_time < r[rk]:
+            r[rk] = round(race_time, 3)
+            new_race = True
+    recs.pop(key, None)
+    recs[key] = r                          # 최근에 달린 맵을 뒤로 (오래된 것부터 정리되게)
+    if len(recs) > 4000:
+        for k in list(recs.keys())[:500]:
+            del recs[k]
+    profile['records'] = recs
+    profile.save()
+    return new_lap, new_race
 
 
 # ----------------------------------------------------------------------------
@@ -3530,12 +3660,16 @@ class KartModel(object):
         self.spin = 0.0
 
 
+CAM_K = [0.82, 1.0, 1.22]          # 카메라 거리 설정 (가까이 / 보통 / 멀리)
+
+
 class ChaseCam(object):
     """추격 카메라: 카트 뒤쪽 위에서 부드럽게 따라간다"""
 
     def __init__(self):
         self.h = None
         self.y = 0.0
+        self.k = 1.0           # 카메라 거리 배율 (설정: 가까이 0.82 / 보통 1 / 멀리 1.22)
 
     def reset(self):
         self.h = None
@@ -3548,8 +3682,8 @@ class ChaseCam(object):
             self.y = rc.y
         self.h += wrap_pi(target - self.h) * (1 - math.exp(-7.0 * dt))
         self.y += (rc.y - self.y) * (1 - math.exp(-9.0 * dt))
-        dist = 8.3 + sr * 2.2 + (1.6 if rc.boosting else 0.0)
-        hgt = 3.5 + sr * 0.4
+        dist = (8.3 + sr * 2.2 + (1.6 if rc.boosting else 0.0)) * self.k
+        hgt = (3.5 + sr * 0.4) * (0.6 + 0.4 * self.k)
         fx, fz = math.sin(self.h), math.cos(self.h)
         x, y, z = rc.x - fx * dist, self.y + hgt, rc.z - fz * dist
         lx, ly, lz = rc.x + fx * 8.0, self.y + 1.2, rc.z + fz * 8.0
@@ -5199,17 +5333,7 @@ class MapStore(object):
         self.load()
 
     def _candidates(self):
-        out = []
-        try:
-            out.append(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv and sys.argv[0] else __file__)), self.filename))
-        except Exception:
-            pass
-        try:
-            out.append(os.path.join(os.path.expanduser('~'), self.filename))
-        except Exception:
-            pass
-        out.append(self.filename)
-        return out
+        return [os.path.join(d, self.filename) if d else self.filename for d in save_dirs()]
 
     def load(self):
         for p in self._candidates():
@@ -5530,12 +5654,315 @@ def T_(lang, ko, en):
     return ko if lang == 'ko' else en
 
 
+# ----------------------------------------------------------------------------
+#  배경음악: 코드로 만드는 반복 곡 -> 16bit 모노 (파일 필요 없음, 폰/PC 같은 생성기)
+#  16마디 = A 부분 8마디 + B 부분 8마디 (코드 진행/베이스/드럼/멜로디가 바뀜), 끝이 처음과 이어져서 끊김 없이 반복
+#  악기: 패드(화음) + 베이스 + 아르페지오 + 멜로디(메아리) + 드럼(킥/스네어/하이햇/심벌)
+#  메뉴 곡 1개 + 레이스 곡 16종 (맵마다 조/빠르기/진행/리듬이 다름)
+#  같은 음은 한 번만 만들어서 재사용 -> PC 에서 한 곡 0.2~0.4초, 폰은 뒤에서 만들어서 렉 없음
+# ----------------------------------------------------------------------------
+MUSIC_RATE = 22050
+MUSIC_STYLES = 16
+_WT = 256
+
+
+def _wave_tables():
+    t = {}
+    t['sine'] = [math.sin(TAU * i / _WT) for i in range(_WT)]
+    t['tri'] = [4.0 * abs(i / float(_WT) - 0.5) - 1.0 for i in range(_WT)]
+    t['saw'] = [2.0 * i / _WT - 1.0 for i in range(_WT)]
+    t['sq'] = [1.0 if i < _WT // 2 else -1.0 for i in range(_WT)]
+    t['pulse'] = [1.0 if i < _WT // 4 else -0.35 for i in range(_WT)]
+    # 부드러운 톱니 (고조파 몇 개만) - 귀가 덜 아픈 베이스/리드
+    t['soft'] = [sum(math.sin(TAU * k * i / _WT) / k for k in range(1, 6)) * 0.55 for i in range(_WT)]
+    t['organ'] = [(math.sin(TAU * i / _WT) + 0.5 * math.sin(TAU * 2 * i / _WT) + 0.25 * math.sin(TAU * 4 * i / _WT)) * 0.6 for i in range(_WT)]
+    # 종소리 비슷한 맑은 소리 (메뉴 멜로디)
+    t['bell'] = [(math.sin(TAU * i / _WT) * 0.75 + math.sin(TAU * 3 * i / _WT) * 0.22 + math.sin(TAU * 5 * i / _WT) * 0.08) for i in range(_WT)]
+    return t
+
+
+_TABLES = None
+
+
+def _midi_hz(n):
+    return 440.0 * 2.0 ** ((n - 69) / 12.0)
+
+
+def _note(table, freq, n, rate, vol, attack, release, sustain=1.0):
+    """표를 훑어서 음 하나 (어택 -> 감쇠 -> 유지 -> 끝부분 페이드)"""
+    n = int(n)
+    if n <= 0:
+        return []
+    a = min(n, max(1, int(attack * rate)))
+    r = max(1, int(release * rate))
+    env = [vol * i / a for i in range(a)]
+    d = min(r, n - a)
+    if d > 0:
+        k = (1.0 - sustain) / r
+        env.extend([vol * (1.0 - k * j) for j in range(d)])
+    if n - a - d > 0:
+        env.extend([vol * sustain] * (n - a - d))
+    t0 = max(0, n - r)
+    inv = 1.0 / r
+    env[t0:] = [e * (n - i) * inv for i, e in enumerate(env[t0:], t0)]
+    stepf = freq * _WT / float(rate)
+    return [table[int(i * stepf) & 255] * e for i, e in enumerate(env)]
+
+
+def _add(mix, start, samples, gain=1.0):
+    """곡 끝을 넘어가는 부분은 처음으로 이어 붙여서 이음새 없이 반복되게 (mix 는 array('d'))"""
+    total = len(mix)
+    ln = len(samples)
+    if ln == 0 or total == 0:
+        return
+    start %= total
+    pos = 0
+    while pos < ln:
+        k = min(total - start, ln - pos)
+        seg = samples[pos:pos + k]
+        if gain == 1.0:
+            mix[start:start + k] = array.array('d', [a + b for a, b in zip(mix[start:start + k], seg)])
+        else:
+            mix[start:start + k] = array.array('d', [a + b * gain for a, b in zip(mix[start:start + k], seg)])
+        pos += k
+        start = 0
+
+
+def _drums(rate, rnd):
+    n = int(rate * 0.22)
+    kick = []
+    ph = 0.0
+    for i in range(n):
+        t = i / float(n)
+        f = 150.0 * (1 - t) ** 2.2 + 42.0
+        ph += f / rate
+        kick.append(math.sin(TAU * ph) * (1 - t) ** 1.6 * 0.95)
+    n = int(rate * 0.16)
+    snare = []
+    lp = 0.0
+    for i in range(n):
+        t = i / float(n)
+        lp += (rnd() * 2 - 1 - lp) * 0.6
+        snare.append((lp * 0.7 + math.sin(TAU * 190 * i / rate) * 0.35 * (1 - t)) * (1 - t) ** 2.0 * 0.6)
+    n = int(rate * 0.05)
+    hat = []
+    prev = 0.0
+    for i in range(n):
+        t = i / float(n)
+        x = rnd() * 2 - 1
+        hat.append((x - prev) * (1 - t) ** 3 * 0.22)
+        prev = x
+    n = int(rate * 0.2)
+    ohat = []
+    prev = 0.0
+    for i in range(n):
+        t = i / float(n)
+        x = rnd() * 2 - 1
+        ohat.append((x - prev) * (1 - t) ** 1.5 * 0.16)
+        prev = x
+    n = int(rate * 1.3)
+    crash = []
+    prev = 0.0
+    lp = 0.0
+    for i in range(n):
+        t = i / float(n)
+        x = rnd() * 2 - 1
+        lp += (x - lp) * 0.5
+        crash.append((x - prev * 0.6 + lp * 0.3) * (1 - t) ** 2.4 * 0.2)
+        prev = x
+    return kick, snare, hat, ohat, crash
+
+
+def make_music(style, seed, rate=MUSIC_RATE, bars=16):
+    """style: 'menu' 또는 'race'. seed 로 조/빠르기/진행/리듬이 바뀐다. 반환: array('h') (모노, rate Hz)"""
+    global _TABLES
+    if _TABLES is None:
+        _TABLES = _wave_tables()
+    W = _TABLES
+    menu = style == 'menu'
+    r = Rng(hash32(int(seed) * 977 + (11 if menu else 29)))
+    bpm = (90 + int(r() * 12)) if menu else (136 + int(r() * 20))
+    minor = r() < (0.45 if menu else 0.62)
+    scale = [0, 2, 3, 5, 7, 8, 10] if minor else [0, 2, 4, 5, 7, 9, 11]
+    root = 45 + int(r() * 8)                       # A2 ~ E3
+    if minor:
+        progs = [[0, 5, 2, 6], [0, 3, 4, 4], [0, 5, 3, 4], [0, 6, 5, 4], [5, 6, 0, 0], [0, 2, 3, 4], [3, 4, 0, 5]]
+    else:
+        progs = [[0, 4, 5, 3], [0, 5, 3, 4], [0, 3, 0, 4], [5, 3, 0, 4], [0, 1, 4, 4], [3, 4, 2, 5], [0, 5, 1, 4]]
+    ia = int(r() * len(progs))
+    ib = (ia + 1 + int(r() * (len(progs) - 1))) % len(progs)
+    prog = (progs[ia], progs[ib])
+    spb = rate * 60.0 / bpm                        # 한 박의 샘플 수
+    s16 = spb / 4.0
+    bars = max(4, int(bars))
+    half = bars // 2
+    total = int(round(spb * 4 * bars))
+    mix = array.array('d', bytes(8 * total))
+    kick, snare, hat, ohat, crash = _drums(rate, r)
+    snare_soft = [x * 0.55 for x in snare]
+    cache = {}
+    pads = {}
+
+    def note(tname, midi, n, vol, attack, release, sustain):
+        key = (tname, midi, int(n), vol, attack, release, sustain)
+        s = cache.get(key)
+        if s is None:
+            s = cache[key] = _note(W[tname], _midi_hz(midi), n, rate, vol, attack, release, sustain)
+        return s
+
+    def tone(deg, octave, chord):
+        o, d = divmod(deg, 7)
+        m = root + scale[d] + 12 * (o + octave)
+        if minor and chord % 7 == 4 and d == 6:    # 단조의 V 화음은 이끎음을 반음 올려서 (화성단음계) 끝맺음이 또렷하게
+            m += 1
+        return m
+
+    # 리듬/음색 고르기 (A 와 B 가 다르게)
+    bass_pats = [[1, 0, 0, 1, 0, 0, 1, 0, 1, 0, 0, 1, 0, 0, 1, 0], [1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1],
+                 [1, 0, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1, 0, 1, 1], [1, 0, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0]]
+    ba = int(r() * len(bass_pats))
+    bass_pat = (bass_pats[ba], bass_pats[(ba + 1 + int(r() * 3)) % len(bass_pats)])
+    shapes = [[0, 1, 2, 1], [0, 2, 1, 2], [0, 1, 2, 3], [2, 1, 0, 1], [0, 2, 3, 2]]
+    sa = int(r() * len(shapes))
+    arp_shape = (shapes[sa], shapes[(sa + 2) % len(shapes)])
+    lead_t = 'pulse' if r() < 0.5 else 'organ'
+    bass_t = 'soft' if menu else ('saw' if r() < 0.5 else 'soft')
+    mel_t = ('bell' if r() < 0.6 else 'sine') if menu else ('sq' if r() < 0.6 else 'pulse')
+
+    # 멜로디: 강박은 화음 음, 약박은 이웃 음으로 걷기. 쉬는 칸이 있으면 앞 음을 늘인다 (A 는 8분음표, B 는 4분음표 위주)
+    def make_motif(steps, rest_p):
+        out = []
+        cur = int(r() * 3) * 2
+        for k in range(steps):
+            if k > 0 and r() < rest_p:
+                out.append(None)
+                continue
+            if k % 4 == 0 or r() < 0.3:
+                cur = [0, 2, 4, 7][int(r() * 4)]
+            else:
+                cur = max(-1, min(9, cur + [-2, -1, 1, 2][int(r() * 4)]))
+            out.append(cur)
+        return out
+    motif_a = make_motif(16, 0.36 if menu else 0.28)
+    motif_b = make_motif(8, 0.2)
+    # B 부분 드럼 변화
+    kick_b = [0, 3, 8, 10] if r() < 0.5 else [0, 6, 8, 14]
+    for bar in range(bars):
+        sec = 0 if bar < half else 1
+        bb = bar % half
+        chord = prog[sec][bb % 4]
+        b0 = int(bar * 4 * spb)
+        # 화음(패드): 마디 전체를 부드럽게. B 부분은 7음을 살짝 더해서 풍성하게
+        pad = pads.get((sec, chord))
+        if pad is None:                                  # 같은 화음은 한 번만 합쳐 두고 재사용
+            pv = 0.065 if menu else 0.048
+            for j, dg in enumerate((0, 2, 4) if sec == 0 else (0, 2, 4, 6)):
+                s = note('tri', tone(chord + dg, 1, chord), 4 * spb, pv * (0.6 if j == 3 else 1.0), 0.09, 0.5, 0.75)
+                pad = list(s) if pad is None else [a + b for a, b in zip(pad, s)]
+            pads[(sec, chord)] = pad
+        _add(mix, b0, pad)
+        # 베이스 (레이스: 8칸마다 한 옥타브 위로 튀기기)
+        pat = bass_pat[sec]
+        for k in range(16):
+            if pat[k]:
+                nb = tone(chord, -1, chord)
+                if not menu and k % 8 == 6:
+                    nb += 12
+                elif sec == 1 and k % 8 == 4:
+                    nb = tone(chord + 4, -1, chord)        # B 부분은 5음도 섞어서
+                _add(mix, b0 + int(k * s16), note(bass_t, nb, s16 * (1.8 if menu else 1.4), 0.22, 0.004, 0.08, 0.6))
+        # 아르페지오 (레이스는 16분, 메뉴는 8분)
+        step = 2 if menu else 1
+        shp = arp_shape[sec]
+        for k in range(0, 16, step):
+            dg = chord + [0, 2, 4, 7][shp[(k // step) % 4]]
+            _add(mix, b0 + int(k * s16), note(lead_t, tone(dg, 1 + sec, chord), s16 * step * 0.9, 0.04 if menu else 0.045 - 0.008 * sec, 0.003, 0.05, 0.4))
+        # 멜로디 + 메아리 (점8분 뒤에 작게 두 번)
+        if sec == 0:
+            phrase = bb // 2
+            first = (bb % 2) * 8
+            mot = motif_a[first:first + 8]
+            if phrase % 2 == 1:                          # 대답 구절: 2도 위로 + 마지막은 으뜸음으로 맺기
+                mot = [None if m is None else m + 2 for m in mot]
+                if bb % 2 == 1:
+                    mot[-2:] = [0, None]
+            unit = 2
+        else:
+            mot = motif_b[(bb % 2) * 4:(bb % 2) * 4 + 4]
+            unit = 4
+        if not (sec == 0 and bb == half - 1 and not menu):   # A 부분 마지막 마디는 드럼 필을 위해 비워 둔다
+            for k, m in enumerate(mot):
+                if m is None:
+                    continue
+                ln = 1
+                while k + ln < len(mot) and mot[k + ln] is None and ln < 3:
+                    ln += 1
+                n_len = s16 * unit * ln * 0.92
+                mv = (0.062 if menu else 0.036) * (1.15 if unit == 4 else 1.0)
+                s = note(mel_t, tone(chord + m, 2, chord), n_len, mv, 0.01, 0.12, 0.7)
+                o = b0 + int(k * unit * s16)
+                _add(mix, o, s)
+                _add(mix, o + int(spb * 0.75), s, 0.3)
+                _add(mix, o + int(spb * 1.5), s, 0.12)
+        # 드럼
+        fill = bb % 4 == 3
+        if bb == 0 or (not menu and bb == 4):
+            _add(mix, b0, crash, 1.0 if bb == 0 else 0.6)
+        for k in range(16):
+            o = b0 + int(k * s16)
+            if menu:
+                if k in (0, 10) or (sec == 1 and k == 7):
+                    _add(mix, o, kick, 0.85)
+                if k in (4, 12):
+                    _add(mix, o, snare_soft)
+                if k % 4 == 2:
+                    _add(mix, o, hat)
+                elif sec == 1 and k % 2 == 1:
+                    _add(mix, o, hat, 0.45)
+            else:
+                if sec == 0:
+                    if k % 4 == 0 or (fill and k in (14, 15)):
+                        _add(mix, o, kick)
+                else:
+                    if k in kick_b or (fill and k in (14, 15)):
+                        _add(mix, o, kick)
+                if k in (4, 12) or (fill and k in (13, 14, 15)):
+                    _add(mix, o, snare)
+                elif fill and k in (10, 11):
+                    _add(mix, o, snare, 0.5)
+                if sec == 1 and k % 4 == 2:
+                    _add(mix, o, ohat)
+                elif k % 2 == 1:
+                    _add(mix, o, hat)
+                elif r() < 0.25:
+                    _add(mix, o, hat, 0.7)
+    # 정규화 + 부드러운 포화 (작은 소리를 조금 키워서 꽉 찬 느낌)
+    peak = max(1e-6, max(mix), -min(mix))
+    inv = 1.0 / peak
+    c1 = 32767 * 0.9 * 1.5 * inv
+    c3 = 32767 * 0.9 * 0.5 * inv * inv * inv
+    return array.array('h', [int(x * (c1 - c3 * x * x)) for x in mix])
+
+
+def music_seed(ref):
+    """맵 -> 레이스 곡 번호 (같은 맵은 같은 곡)"""
+    if isinstance(ref, dict):
+        return cmap_key(ref) % MUSIC_STYLES
+    return int(ref) % MUSIC_STYLES
+
+
 
 # ============================================================================
 #  [PC] 절차적 메시 / 텍스처 도우미  (코어 좌표 y-up  ->  Panda3D z-up : (x, y, z) -> (x, -z, y))
 # ============================================================================
 def PV(x, y, z):
     return (x, -z, y)
+
+
+# 그래픽 설정 (설정 메뉴가 바꾸고, 월드/카트/효과를 만들 때 읽는다)
+#   aniso 텍스처 필터, props_k 장식물 밀도, fx_k 파티클 수, weather_k 날씨 입자 수, shadows 카트 그림자,
+#   cull_m 이 거리(m)보다 먼 장식물 묶음은 숨김(0 = 안 숨김), fog_k 안개 배율(<1 이면 더 멀리 보임)
+GFX = dict(aniso=8, props_k=1.0, fx_k=1.0, weather_k=1.0, shadows=True, cull_m=0.0, fog_k=1.0)
 
 
 def rgbf(c, k=1.0, a=1.0):
@@ -5770,7 +6197,7 @@ def make_texture(name, w, h, data, fmt='RGB', repeat=True):
     t.setMinfilter(Texture.FT_linear_mipmap_linear)
     t.setMagfilter(Texture.FT_linear)
     try:
-        t.setAnisotropicDegree(4)
+        t.setAnisotropicDegree(int(GFX.get('aniso', 4)))
     except Exception:
         pass
     return t
@@ -5997,7 +6424,11 @@ class World(object):
         fog = Fog('fog')
         fog.setColor(fc[0] / 255.0, fc[1] / 255.0, fc[2] / 255.0)
         fog.setMode(Fog.MExponentialSquared)
-        fog.setExpDensity(th['fog_d'])
+        dens = th['fog_d']
+        cm = GFX.get('cull_m', 0.0)
+        if cm > 0:
+            dens = max(dens, 1.3 / cm)            # 숨기는 거리 근처는 안개로 자연스럽게 가려지게
+        fog.setExpDensity(dens * GFX.get('fog_k', 1.0))
         self.fog = fog
         self.app.render.setFog(fog)
         self.app.setBackgroundColor(fc[0] / 255.0, fc[1] / 255.0, fc[2] / 255.0)
@@ -6670,8 +7101,11 @@ class World(object):
         protos = {}
         chunks = {}
         holder = NodePath('protos')
-        for p in tr.props:
+        pk = GFX.get('props_k', 1.0)
+        for n, p in enumerate(tr.props):
             kind = p['kind']
+            if pk < 0.999 and not p.get('user') and (hash32(n * 31 + 7) % 1000) >= pk * 1000:
+                continue                          # 장식물 밀도 설정 (직접 놓은 물건은 항상 보임)
             nv = PROP_VARS.get(kind, 1)
             var = int(p['r1'] * nv) % nv if nv > 1 else 0
             key = (kind, var)
@@ -6709,8 +7143,11 @@ class World(object):
                 inst.setScale(*sc)
                 if shade != 1.0:
                     inst.setColorScale(shade, shade, shade, 1)
-        for chunk in chunks.values():
+        self.chunks = []
+        for ck, chunk in chunks.items():
             chunk.flattenStrong()
+            i = min(tr.N - 1, ck * 36 + 18)
+            self.chunks.append([PV(tr.px[i], tr.py[i], tr.pz[i]), chunk, True])
         holder.removeNode()
 
     def _lamps(self):
@@ -6746,6 +7183,18 @@ class World(object):
     # ---- 갱신/정리 ---------------------------------------------------------------------------
     def update(self, cam_pos):
         self.sky.setPos(*cam_pos)
+        cm = GFX.get('cull_m', 0.0)
+        if cm > 0 and getattr(self, 'chunks', None):
+            lim = (cm + 160.0) ** 2              # 묶음 반지름만큼 여유
+            for c in self.chunks:
+                p = c[0]
+                on = (p[0] - cam_pos[0]) ** 2 + (p[1] - cam_pos[1]) ** 2 < lim
+                if on != c[2]:
+                    c[2] = on
+                    if on:
+                        c[1].show()
+                    else:
+                        c[1].hide()
 
     def destroy(self):
         for l in self.lights:
@@ -6840,6 +7289,8 @@ class KartNode(object):
         sh.setLightOff()
         sh.setDepthWrite(False)
         sh.setBin('fixed', 2)
+        if not GFX.get('shadows', True):
+            sh.hide()
         self.shadow = sh
         # 부스트 불꽃
         fm = Mesh()
@@ -6995,6 +7446,7 @@ class KartNode(object):
 
 class Particles(object):
     def __init__(self, app, n=150):
+        n = max(40, int(n * GFX.get('fx_k', 1.0)))
         self.app = app
         self.items = []
         cm = CardMaker('p')
@@ -7058,7 +7510,7 @@ class Weather(object):
         spec = WEATHER.get(kind, ((255, 255, 255), 3.0, 1.0, 2))
         self.vy = -spec[1]
         self.drift = spec[2]
-        self.n = {'snow': 520, 'rain': 700, 'firefly': 160, 'sparkle': 110, 'dust': 260}.get(kind, 320)
+        self.n = max(20, int({'snow': 520, 'rain': 700, 'firefly': 160, 'sparkle': 110, 'dust': 260}.get(kind, 320) * GFX.get('weather_k', 1.0)))
         self.lines = kind == 'rain'
         fmt = GeomVertexFormat.getV3()
         self.vd = GeomVertexData('weather', fmt, Geom.UHDynamic)
@@ -7746,7 +8198,9 @@ class HUD(object):
         self._set(self.tot, '/%d' % len(race.racers))
         self._set(self.lap, 'LAP %d/%d' % (min(race.laps, sim.lap), race.laps))
         self._set(self.time, fmt_time(max(0.0, race.t)))
-        self._set(self.spd, str(int(sim.speed * 3.6)))
+        mph = self.app.profile['units'] == 'mph'
+        self._set(self.spd, str(int(sim.speed * (2.23694 if mph else 3.6))))
+        self._set(self.kmh, 'mph' if mph else 'km/h')
         self.boost.set(sim.speed / sim.stats['max_speed'], (1.0, 0.63, 0.16, 1) if sim.boost_t > 0 else (0.1, 0.9, 1.0, 1))
         if sim.drifting:
             col = [(0.67, 0.8, 1, 1), (0.23, 0.67, 1, 1), (1, 0.63, 0.16, 1), (0.82, 0.31, 1, 1)][sim.drift_tier]
@@ -7829,6 +8283,7 @@ class MenuUI(object):
         self.subtitle = ''
         self.hint = ''
         self.visible = True
+        self.row_z = {}
         cm = CardMaker('panel')
         cm.setFrame(0.03, 1.72, -1.97, -0.04)
         self.panel = self.root.attachNewNode(cm.generate())
@@ -7863,6 +8318,7 @@ class MenuUI(object):
         if self.subtitle:
             self.nodes.append(OnscreenText(text=self.subtitle, pos=(0.12, -0.34), scale=0.05, fg=(0.8, 0.86, 1, 1), **kw))
         z = -0.5
+        self.row_z = {}
         for i, r in enumerate(self.rows):
             kind = r.get('kind', 'item')
             if kind == 'info':
@@ -7874,7 +8330,15 @@ class MenuUI(object):
             en = r.get('enabled', True)
             col = (1, 0.78, 0.22, 1) if sel else ((0.55, 0.57, 0.63, 1) if not en else ((1, 0.55, 0.45, 1) if kind == 'primary' else (0.95, 0.97, 1, 1)))
             txt = ('> ' if sel else '   ') + r['text']
-            self.nodes.append(OnscreenText(text=txt, pos=(0.1, z), scale=0.074, fg=col, **kw))
+            t = OnscreenText(text=txt, pos=(0.1, z), scale=0.074, fg=col, **kw)
+            try:
+                w = t.textNode.calcWidth(txt) * 0.074
+                if w > 1.58:
+                    t.setScale(0.074 * 1.58 / w)       # 긴 줄은 패널 안에 들어가게
+            except Exception:
+                pass
+            self.nodes.append(t)
+            self.row_z[i] = z
             z -= 0.1
         if self.hint:
             self.nodes.append(OnscreenText(text=self.hint, pos=(0.12, -1.9), scale=0.04, fg=(0.7, 0.78, 0.95, 1), **kw))
@@ -7905,6 +8369,51 @@ class MenuUI(object):
         elif name in ('enter', 'space') and r and r.get('enter'):
             self.app.sfx_play('click', 0.5)
             r['enter']()
+        else:
+            return False
+        return True
+
+    # ---- 마우스: 올리면 선택, 클릭 = 실행/다음 값, 오른쪽 클릭 = 이전 값, 휠 = 값 바꾸기 ----
+    def row_at(self, pos):
+        if pos is None or not self.visible:
+            return -1
+        a = self.app.getAspectRatio()
+        x, z = pos[0] + a, pos[1] - 1.0
+        if not (0.04 <= x <= 1.72):
+            return -1
+        for i, rz in self.row_z.items():
+            if rz - 0.03 <= z <= rz + 0.075 and self._selectable(i):
+                return i
+        return -1
+
+    def hover(self, pos):
+        i = self.row_at(pos)
+        if i >= 0 and i != self.sel:
+            self.sel = i
+            self.rebuild()
+
+    def mouse(self, kind, pos, mult=1):
+        i = self.row_at(pos)
+        if i < 0:
+            return False
+        if i != self.sel:
+            self.sel = i
+            self.rebuild()
+        r = self.rows[i]
+        if kind == 'l':
+            if r.get('enter'):
+                self.app.sfx_play('click', 0.5)
+                r['enter']()
+            elif r.get('right'):
+                self.app.sfx_play('click', 0.4)
+                r['right'](mult)
+        elif kind == 'r' and r.get('left'):
+            self.app.sfx_play('click', 0.4)
+            r['left'](mult)
+        elif kind == 'wu' and r.get('right'):
+            r['right'](mult)
+        elif kind == 'wd' and r.get('left'):
+            r['left'](mult)
         else:
             return False
         return True
@@ -8035,12 +8544,24 @@ def synth_engine(rate=22050):
 class Audio(object):
     def __init__(self, app, enabled=True):
         self.ok = False
+        self.app = app
         self.enabled = enabled
         self.snd = {}
         self.eng_on = False
         self.drift_on = False
+        self.vol = dict(master=1.0, sfx=1.0, engine=0.8, music=0.5)
+        self.music_on = True
+        self.music_snd = None
+        self.music_key = None
+        self.pending = None
+        self.rate = 1.0
+        self.dir = None
         try:
-            d = tempfile.mkdtemp(prefix='kart3d_snd_')
+            _clean_old_temp('kart3d_snd_')
+            d = self.dir = tempfile.mkdtemp(prefix='kart3d_snd_')
+            import atexit
+            import shutil
+            atexit.register(shutil.rmtree, d, True)          # 끝날 때 임시 소리 파일 정리
             defs = {
                 'count': synth(520, 160, 0.28, 'square'), 'go': synth(1040, 520, 0.28, 'square'), 'boost': synth_noise(520, 0.38, True),
                 'bump': synth(110, 170, 0.5, 'sine', 0.45), 'tier': synth(1500, 70, 0.2, 'tri'), 'lap': synth(740, 260, 0.28, 'tri', 1.34),
@@ -8052,12 +8573,7 @@ class Audio(object):
             }
             for name, buf in defs.items():
                 path = os.path.join(d, name + '.wav')
-                w = wave.open(path, 'wb')
-                w.setnchannels(1)
-                w.setsampwidth(2)
-                w.setframerate(22050)
-                w.writeframes(buf.tobytes())
-                w.close()
+                _write_wav(path, buf, 22050)
                 self.snd[name] = app.loader.loadSfx(Filename.fromOsSpecific(path).getFullpath())
             self.snd['engine'].setLoop(True)
             self.snd['driftl'].setLoop(True)
@@ -8065,14 +8581,88 @@ class Audio(object):
         except Exception:
             self.ok = False
 
+    # ---- 볼륨 ----
+    def set_volumes(self, master, sfx, engine, music, music_on=True):
+        self.vol = dict(master=clamp(master, 0, 1), sfx=clamp(sfx, 0, 1), engine=clamp(engine, 0, 1), music=clamp(music, 0, 1))
+        self.music_on = bool(music_on)
+        if self.music_snd is not None:
+            try:
+                if self.music_on and self.enabled:
+                    self.music_snd.setVolume(self._mv())
+                    if self.music_snd.status() != self.music_snd.PLAYING:
+                        self.music_snd.play()
+                else:
+                    self.music_snd.stop()
+            except Exception:
+                pass
+
+    def _mv(self):
+        return 0.55 * self.vol['master'] * self.vol['music']
+
     def play(self, name, vol=1.0):
         if not (self.ok and self.enabled):
             return
         s = self.snd.get(name)
         if s is not None:
             try:
-                s.setVolume(vol)
+                s.setVolume(vol * self.vol['master'] * self.vol['sfx'])
                 s.play()
+            except Exception:
+                pass
+
+    # ---- 배경음악: 처음 한 번 만들 때만 시간이 걸려서 뒤에서 만든다 ----
+    def music(self, kind, seed=0):
+        if not self.ok:
+            return
+        key = (kind, int(seed))
+        if key == self.music_key:
+            return
+        self.music_key = key
+        self.rate = 1.0
+        if self.music_snd is not None:
+            try:
+                self.music_snd.stop()
+            except Exception:
+                pass
+            self.music_snd = None
+        path = os.path.join(self.dir, 'music_%s_%d.wav' % key)
+        if os.path.isfile(path):
+            self.pending = (key, path)
+            return
+
+        def work():
+            try:
+                buf = make_music(kind, seed, MUSIC_RATE)
+                tmp = path + '.part'
+                _write_wav(tmp, buf, MUSIC_RATE)
+                os.replace(tmp, path)
+                self.pending = (key, path)
+            except Exception:
+                pass
+        threading.Thread(target=work, daemon=True).start()
+
+    def tick(self):
+        p = self.pending
+        if p is None or p[0] != self.music_key:
+            return
+        self.pending = None
+        try:
+            m = self.app.loader.loadMusic(Filename.fromOsSpecific(p[1]).getFullpath())
+            m.setLoop(True)
+            m.setVolume(self._mv())
+            m.setPlayRate(self.rate)
+            self.music_snd = m
+            if self.music_on and self.enabled:
+                m.play()
+        except Exception:
+            self.music_snd = None
+
+    def music_rate(self, rate):
+        """마지막 바퀴에서 음악을 살짝 빠르게 (재생 속도 = 빠르기 + 음높이)"""
+        self.rate = rate
+        if self.music_snd is not None:
+            try:
+                self.music_snd.setPlayRate(rate)
             except Exception:
                 pass
 
@@ -8086,18 +8676,18 @@ class Audio(object):
                 e.play()
                 self.eng_on = True
             e.setPlayRate(0.55 + clamp(ratio, 0, 1.3) * 1.9)
-            e.setVolume(0.22 + 0.25 * throttle)
+            e.setVolume((0.22 + 0.25 * throttle) * self.vol['master'] * self.vol['engine'])
             want = drifting or (offroad and ratio > 0.2)
             d = self.snd['driftl']
             if want and not self.drift_on:
-                d.setVolume(0.5)
+                d.setVolume(0.5 * self.vol['master'] * self.vol['sfx'])
                 d.play()
                 self.drift_on = True
             elif not want and self.drift_on:
                 d.stop()
                 self.drift_on = False
             if self.drift_on:
-                d.setVolume(0.55 if drifting else 0.22)
+                d.setVolume((0.55 if drifting else 0.22) * self.vol['master'] * self.vol['sfx'])
         except Exception:
             pass
 
@@ -8113,6 +8703,479 @@ class Audio(object):
         self.drift_on = False
 
 
+def _clean_old_temp(prefix, max_age=24 * 3600):
+    """예전에 비정상 종료돼서 남은 임시 폴더 정리 (하루 넘은 것만)"""
+    try:
+        import shutil
+        base = tempfile.gettempdir()
+        now = time.time()
+        for name in os.listdir(base):
+            if name.startswith(prefix):
+                p = os.path.join(base, name)
+                if os.path.isdir(p) and now - os.path.getmtime(p) > max_age:
+                    shutil.rmtree(p, True)
+    except Exception:
+        pass
+
+
+def _write_wav(path, buf, rate):
+    w = wave.open(path, 'wb')
+    w.setnchannels(1)
+    w.setsampwidth(2)
+    w.setframerate(rate)
+    w.writeframes(buf.tobytes())
+    w.close()
+
+
+# ============================================================================
+#  [PC] 설정 화면: 그래픽(품질 프리셋) / 화면 / 소리 / 조작·카메라 / 게임  - 마우스·키보드 모두 사용
+# ============================================================================
+GFX_PRESETS = {
+    'low': dict(msaa=0, aniso=1, view=0, props_k=0.35, fx_k=0.5, weather_k=0.4, shadows=False),
+    'medium': dict(msaa=2, aniso=4, view=1, props_k=0.65, fx_k=0.75, weather_k=0.7, shadows=True),
+    'high': dict(msaa=4, aniso=8, view=2, props_k=1.0, fx_k=1.0, weather_k=1.0, shadows=True),
+    'ultra': dict(msaa=8, aniso=16, view=3, props_k=1.0, fx_k=1.0, weather_k=1.0, shadows=True),
+}
+GFX_ORDER = ['low', 'medium', 'high', 'ultra', 'custom']
+GFX_NAME = {'low': ('낮음', 'Low'), 'medium': ('중간', 'Medium'), 'high': ('높음', 'High'), 'ultra': ('최고', 'Ultra'), 'custom': ('사용자 지정', 'Custom')}
+VIEW_LEVELS = [(380.0, 1.0), (650.0, 1.0), (0.0, 1.0), (0.0, 0.8)]       # (이보다 먼 장식물 숨김 m, 안개 배율)
+VIEW_NAME = [('가까이', 'Near'), ('보통', 'Normal'), ('멀리', 'Far'), ('아주 멀리', 'Very far')]
+PROPS_STEPS = [0.35, 0.5, 0.65, 0.8, 1.0]
+FX_STEPS = [0.5, 0.75, 1.0]
+WEATHER_STEPS = [0.0, 0.4, 0.7, 1.0]
+MSAA_STEPS = [0, 2, 4, 8]
+ANISO_STEPS = [1, 2, 4, 8, 16]
+FPS_CAPS = [0, 30, 60, 120, 144, 165, 240]
+RES_COMMON = [(1280, 720), (1366, 768), (1600, 900), (1920, 1080), (2560, 1080), (2560, 1440), (3440, 1440), (3840, 2160)]
+
+
+def parse_res(v):
+    try:
+        w, h = str(v).lower().split('x')
+        w, h = int(w), int(h)
+        if 320 <= w <= 16384 and 240 <= h <= 16384:
+            return (w, h)
+    except Exception:
+        pass
+    return None
+
+
+def gfx_sync(profile):
+    """프로필의 그래픽 값 -> GFX (월드/카트/효과를 만들 때 읽음)"""
+    v = int(clamp(int(profile['view']), 0, 3))
+    cull, fogk = VIEW_LEVELS[v]
+    GFX.update(aniso=int(profile['aniso']), props_k=float(profile['props_k']), fx_k=float(profile['fx_k']),
+               weather_k=float(profile['weather_k']), shadows=bool(profile['shadows']), cull_m=cull, fog_k=fogk)
+
+
+def startup_cfg(profile, args):
+    """창을 만들기 전에 넣는 Panda3D 설정 (해상도/화면 모드/수직 동기화/안티에일리어싱)"""
+    res = args.get('window') or parse_res(profile['res']) or (1280, 720)
+    disp = 'fullscreen' if args.get('fullscreen') else str(profile['display'])
+    if args.get('window'):
+        disp = 'window'
+    lines = ['win-size %d %d' % (res[0], res[1]), 'sync-video %d' % (1 if profile['vsync'] else 0)]
+    if disp == 'fullscreen':
+        lines.append('fullscreen 1')
+    elif disp == 'borderless':
+        lines += ['undecorated 1', 'win-origin 0 0']
+    msaa = int(profile['msaa'])
+    if msaa > 0:
+        lines += ['framebuffer-multisample 1', 'multisamples %d' % msaa]
+    return lines
+
+
+def _cycle(lst, cur, d):
+    try:
+        i = lst.index(cur)
+    except ValueError:
+        i = min(range(len(lst)), key=lambda k: abs(lst[k] - cur)) if isinstance(cur, (int, float)) else 0
+    return lst[(i + d) % len(lst)]
+
+
+class SettingsMixin(object):
+    """Game 에 섞어 쓰는 설정 화면/적용 함수들"""
+
+    # ---- 적용 ----------------------------------------------------------------------
+    def desktop_size(self):
+        try:
+            w, h = self.pipe.getDisplayWidth(), self.pipe.getDisplayHeight()
+            if w > 0 and h > 0:
+                return (w, h)
+        except Exception:
+            pass
+        return (1920, 1080)
+
+    def res_list(self):
+        dw, dh = self.desktop_size()
+        out = set(r for r in RES_COMMON if r[0] <= dw and r[1] <= dh)
+        out.add((dw, dh))
+        try:
+            di = self.pipe.getDisplayInformation()
+            for i in range(di.getTotalDisplayModes()):
+                w, h = di.getDisplayModeWidth(i), di.getDisplayModeHeight(i)
+                if w >= 1024 and h >= 600 and w <= dw and h <= dh:
+                    out.add((w, h))
+        except Exception:
+            pass
+        return sorted(out)
+
+    def cur_res(self):
+        try:
+            return (self.win.getXSize(), self.win.getYSize())
+        except Exception:
+            return parse_res(self.profile['res']) or (1280, 720)
+
+    def apply_display(self):
+        if self.offscreen:
+            return
+        p = self.profile
+        props = WindowProperties()
+        disp = p['display']
+        if disp == 'borderless':
+            w, h = self.desktop_size()
+            props.setFullscreen(False)
+            props.setUndecorated(True)
+            props.setOrigin(0, 0)
+            props.setSize(w, h)
+        else:
+            w, h = parse_res(p['res']) or self.cur_res()
+            props.setUndecorated(False)
+            props.setFullscreen(disp == 'fullscreen')
+            props.setSize(w, h)
+        try:
+            self.win.requestProperties(props)
+        except Exception:
+            pass
+
+    def apply_runtime(self):
+        """바로 바꿀 수 있는 설정들 (안티에일리어싱 켬/끔, 프레임 제한, 카메라, 볼륨, 그래픽 값)"""
+        p = self.profile
+        gfx_sync(p)
+        try:
+            self.render.setAntialias(AntialiasAttrib.MAuto if int(p['msaa']) > 0 else AntialiasAttrib.MNone)
+        except Exception:
+            pass
+        try:
+            gc = ClockObject.getGlobalClock()
+            cap = int(p['fps_cap'])
+            if cap > 0:
+                gc.setMode(ClockObject.MLimited)
+                gc.setFrameRate(cap)
+            else:
+                gc.setMode(ClockObject.MNormal)
+        except Exception:
+            pass
+        self.chase.k = CAM_K[int(clamp(int(p['cam_dist']), 0, 2))]
+        self.audio.enabled = bool(p['sound'])
+        self.audio.set_volumes(float(p['vol_master']), float(p['vol_sfx']), float(p['vol_engine']), float(p['vol_music']), bool(p['music']))
+        # 그림자는 지금 보이는 카트에도 바로
+        for n in list(getattr(self, 'nodes', {}).values()) + ([self.show_node] if getattr(self, 'show_node', None) is not None else []):
+            try:
+                n.shadow.show() if p['shadows'] else n.shadow.hide()
+            except Exception:
+                pass
+
+    def set_preset(self, name):
+        p = self.profile
+        p['gfx'] = name
+        if name in GFX_PRESETS:
+            for k, v in GFX_PRESETS[name].items():
+                p[k] = v
+        p.save()
+        self.apply_runtime()
+
+    def set_opt(self, key, value):
+        p = self.profile
+        p[key] = value
+        if key in ('msaa', 'aniso', 'view', 'props_k', 'fx_k', 'weather_k', 'shadows'):
+            p['gfx'] = 'custom'
+            for name, pre in GFX_PRESETS.items():
+                if all(p[k] == v for k, v in pre.items()):
+                    p['gfx'] = name
+        p.save()
+        self.apply_runtime()
+
+    # ---- 화면 구성 -------------------------------------------------------------------
+    def settings_back(self):
+        """설정 화면에서 '뒤로'"""
+        page = getattr(self, 'set_page', 'main')
+        if page != 'main':
+            self.set_page = 'main'
+            self.build_settings()
+        elif getattr(self, 'settings_from_pause', False):
+            self.settings_from_pause = False
+            self.paused = False
+            self.toggle_pause()
+        else:
+            self.profile.save()
+            self.go('menu')
+
+    def open_settings(self, page='main', from_pause=False):
+        self.set_page = page
+        self.settings_from_pause = from_pause
+        if not from_pause:
+            self.go('settings')
+        else:
+            self.build_settings()
+
+    def build_settings(self):
+        page = getattr(self, 'set_page', 'main')
+        fn = {'gfx': self.build_set_gfx, 'display': self.build_set_display, 'audio': self.build_set_audio,
+              'controls': self.build_set_controls, 'game': self.build_set_game}.get(page)
+        if fn is not None:
+            fn()
+            return
+
+        def sub(pg):
+            def f(m=1):
+                self.set_page = pg
+                self.build_settings()
+            return f
+        p = self.profile
+        gn = GFX_NAME.get(p['gfx'], GFX_NAME['custom'])
+        rows = [self.R('%s   [%s]' % (T('그래픽', 'Graphics'), T(gn[0], gn[1])), sub('gfx'), id='s_gfx', kind='primary'),
+                self.R('%s   [%s · %dx%d]' % (T('화면', 'Display'), self.disp_name(), self.cur_res()[0], self.cur_res()[1]), sub('display'), id='s_disp'),
+                self.R('%s   [%d%%]' % (T('소리', 'Audio'), int(round(float(p['vol_master']) * 100))), sub('audio'), id='s_audio'),
+                self.R(T('조작 · 카메라', 'Controls & camera'), sub('controls'), id='s_ctl'),
+                self.R(T('게임 (언어 · 단위)', 'Game (language · units)'), sub('game'), id='s_game'),
+                self.R(T('뒤로', 'Back'), lambda: self.settings_back(), id='back')]
+        self.menu.set(T('설정', 'Settings'), rows, T('마우스 클릭 · 휠, 또는 ↑↓ ←→ Enter', 'Mouse click / wheel, or arrows + Enter'),
+                      T('Esc 뒤로', 'Esc back'))
+        self.menu.clear_extra()
+
+    def disp_name(self):
+        d = self.profile['display']
+        return {'window': T('창 모드', 'Windowed'), 'fullscreen': T('전체 화면', 'Fullscreen'), 'borderless': T('테두리 없는 창', 'Borderless')}.get(d, d)
+
+    def _onoff(self, v):
+        return T('켬', 'On') if v else T('끔', 'Off')
+
+    def build_set_gfx(self):
+        p = self.profile
+
+        def preset(d):
+            def f(m=1):
+                order = GFX_ORDER[:-1]
+                cur = p['gfx'] if p['gfx'] in order else 'high'
+                self.set_preset(order[(order.index(cur) + d) % len(order)])
+                self.build_settings()
+            return f
+
+        def opt(key, steps, d_default=1):
+            def mk(d):
+                def f(m=1):
+                    self.set_opt(key, _cycle(steps, p[key], d))
+                    self.build_settings()
+                return f
+            return mk
+
+        def tog(key):
+            def f(m=1):
+                self.set_opt(key, not p[key])
+                self.build_settings()
+            return f
+        gn = GFX_NAME.get(p['gfx'], GFX_NAME['custom'])
+        msaa_note = ''
+        if int(p['msaa']) != getattr(self, 'start_msaa', int(p['msaa'])):
+            msaa_note = T('  (다시 시작 후 적용)', '  (after restart)')
+        o_msaa, o_an, o_pr, o_fx, o_we = opt('msaa', MSAA_STEPS), opt('aniso', ANISO_STEPS), opt('props_k', PROPS_STEPS), opt('fx_k', FX_STEPS), opt('weather_k', WEATHER_STEPS)
+        vn = VIEW_NAME[int(clamp(int(p['view']), 0, 3))]
+
+        def view(d):
+            def f(m=1):
+                self.set_opt('view', (int(p['view']) + d) % 4)
+                self.build_settings()
+            return f
+        rows = [self.R('%s  < %s >' % (T('품질 프리셋', 'Quality preset'), T(gn[0], gn[1])), preset(1), preset(-1), preset(1), id='g_preset', kind='primary'),
+                self.R('%s  < %s >%s' % (T('안티에일리어싱', 'Anti-aliasing'), T('끄기', 'Off') if int(p['msaa']) == 0 else 'MSAA %dx' % int(p['msaa']), msaa_note),
+                       o_msaa(1), o_msaa(-1), o_msaa(1), id='g_msaa'),
+                self.R('%s  < %s >' % (T('텍스처 필터', 'Texture filtering'), '%dx' % int(p['aniso'])), o_an(1), o_an(-1), o_an(1), id='g_an'),
+                self.R('%s  < %s >' % (T('시야 거리', 'View distance'), T(vn[0], vn[1])), view(1), view(-1), view(1), id='g_view'),
+                self.R('%s  < %d%% >' % (T('장식물 밀도', 'Scenery density'), int(round(float(p['props_k']) * 100))), o_pr(1), o_pr(-1), o_pr(1), id='g_props'),
+                self.R('%s  < %d%% >' % (T('효과 (파티클)', 'Effects (particles)'), int(round(float(p['fx_k']) * 100))), o_fx(1), o_fx(-1), o_fx(1), id='g_fx'),
+                self.R('%s  < %s >' % (T('날씨 입자', 'Weather particles'), T('끄기', 'Off') if float(p['weather_k']) <= 0 else '%d%%' % int(round(float(p['weather_k']) * 100))),
+                       o_we(1), o_we(-1), o_we(1), id='g_weather'),
+                self.R('%s  < %s >' % (T('카트 그림자', 'Kart shadows'), self._onoff(p['shadows'])), tog('shadows'), tog('shadows'), tog('shadows'), id='g_shadow'),
+                self.I(T('시야 거리·장식물·효과·날씨는 다음 레이스부터 적용돼요', 'View distance, scenery, effects and weather apply from the next race'), scale=0.042),
+                self.R(T('뒤로', 'Back'), lambda: self.settings_back(), id='back')]
+        self.menu.set(T('그래픽', 'Graphics'), rows, T('낮음 → 최고: 안티에일리어싱 · 텍스처 · 시야 거리 · 장식물 · 효과', 'Low → Ultra: AA · textures · view distance · scenery · effects'),
+                      T('클릭/→ 다음 값 · 오른쪽 클릭/← 이전 값 · 휠', 'Click/→ next · right-click/← previous · wheel'))
+
+    def build_set_display(self):
+        p = self.profile
+
+        def disp(d):
+            def f(m=1):
+                order = ['window', 'fullscreen', 'borderless']
+                cur = p['display'] if p['display'] in order else 'window'
+                p['display'] = order[(order.index(cur) + d) % 3]
+                p.save()
+                self.apply_display()
+                self.build_settings()
+            return f
+        lst = self.res_list()
+
+        def res(d):
+            def f(m=1):
+                cur = parse_res(p['res']) or self.cur_res()
+                try:
+                    i = lst.index(tuple(cur))
+                except ValueError:
+                    i = min(range(len(lst)), key=lambda k: abs(lst[k][0] - cur[0]) + abs(lst[k][1] - cur[1]))
+                    i -= 1 if d > 0 else 0
+                w, h = lst[(i + d) % len(lst)]
+                p['res'] = '%dx%d' % (w, h)
+                if p['display'] == 'borderless':
+                    p['display'] = 'window'
+                p.save()
+                self.apply_display()
+                self.build_settings()
+            return f
+
+        def vs(m=1):
+            p['vsync'] = not p['vsync']
+            p.save()
+            self.build_settings()
+
+        def cap(d):
+            def f(m=1):
+                p['fps_cap'] = _cycle(FPS_CAPS, int(p['fps_cap']), d)
+                p.save()
+                self.apply_runtime()
+                self.build_settings()
+            return f
+
+        def fov(d):
+            def f(m=1):
+                p['fov'] = int(clamp(int(p['fov']) + d * (5 if m >= 10 else 1), 65, 110))
+                p.save()
+                self.build_settings()
+            return f
+
+        def fps(m=1):
+            self.show_fps = not self.show_fps
+            self.build_settings()
+        rr = parse_res(p['res']) or self.cur_res()
+        vs_note = T('  (다시 시작 후 적용)', '  (after restart)') if bool(p['vsync']) != getattr(self, 'start_vsync', bool(p['vsync'])) else ''
+        rows = [self.R('%s  < %s >' % (T('화면 모드', 'Display mode'), self.disp_name()), disp(1), disp(-1), disp(1), id='d_mode'),
+                self.R('%s  < %dx%d >' % (T('해상도', 'Resolution'), rr[0], rr[1]), res(1), res(-1), res(1), id='d_res', enabled=p['display'] != 'borderless'),
+                self.R('%s  < %s >%s' % (T('수직 동기화 (VSync)', 'VSync'), self._onoff(p['vsync']), vs_note), vs, vs, vs, id='d_vsync'),
+                self.R('%s  < %s >' % (T('프레임 제한', 'Frame rate limit'), T('무제한', 'Unlimited') if int(p['fps_cap']) == 0 else '%d fps' % int(p['fps_cap'])),
+                       cap(1), cap(-1), cap(1), id='d_cap'),
+                self.R('%s  < %d° >' % (T('시야각 (FOV)', 'Field of view'), int(p['fov'])), fov(1), fov(-1), fov(1), id='d_fov'),
+                self.R('FPS %s  < %s >' % (T('표시', 'counter'), self._onoff(self.show_fps)), fps, fps, fps, id='d_fps'),
+                self.R(T('뒤로', 'Back'), lambda: self.settings_back(), id='back')]
+        dw, dh = self.desktop_size()
+        self.menu.set(T('화면', 'Display'), rows, T('모니터 %dx%d · F11 = 전체 화면 전환', 'Monitor %dx%d · F11 toggles fullscreen') % (dw, dh) if LANG == 'ko'
+                      else 'Monitor %dx%d · F11 toggles fullscreen' % (dw, dh), T('클릭/→ 다음 값 · 오른쪽 클릭/← 이전 값 · 휠', 'Click/→ next · right-click/← previous · wheel'))
+
+    def build_set_audio(self):
+        p = self.profile
+
+        def vol(key):
+            def mk(d):
+                def f(m=1):
+                    p[key] = round(clamp(float(p[key]) + d * 0.1, 0.0, 1.0), 2)
+                    p.save()
+                    self.apply_runtime()
+                    self.build_settings()
+                    self.sfx_play('click', 0.6)
+                return f
+            return mk
+
+        def tog(key):
+            def f(m=1):
+                p[key] = not p[key]
+                p.save()
+                self.apply_runtime()
+                self.build_settings()
+            return f
+
+        def bar(v):
+            n = int(round(float(v) * 10))
+            return '%3d%%  %s' % (int(round(float(v) * 100)), '|' * n + '.' * (10 - n))
+        rows = []
+        for key, ko, en in (('vol_master', '전체 볼륨', 'Master'), ('vol_sfx', '효과음', 'Effects'), ('vol_engine', '엔진 소리', 'Engine'), ('vol_music', '배경음악', 'Music')):
+            v = vol(key)
+            rows.append(self.R('%s  < %s >' % (T(ko, en), bar(p[key])), v(1), v(-1), v(1), id='a_' + key))
+        rows += [self.R('%s  < %s >' % (T('소리', 'Sound'), self._onoff(p['sound'])), tog('sound'), tog('sound'), tog('sound'), id='a_sound'),
+                 self.R('%s  < %s >' % (T('배경음악', 'Music'), self._onoff(p['music'])), tog('music'), tog('music'), tog('music'), id='a_music'),
+                 self.R(T('뒤로', 'Back'), lambda: self.settings_back(), id='back')]
+        self.menu.set(T('소리', 'Audio'), rows, T('M 키 = 레이스 중 소리 켜기/끄기', 'M = mute during a race'),
+                      T('클릭/→ 크게 · 오른쪽 클릭/← 작게 · 휠', 'Click/→ louder · right-click/← quieter · wheel'))
+
+    def build_set_controls(self):
+        p = self.profile
+
+        def steer(d):
+            def f(m=1):
+                p['steer_resp'] = (int(p['steer_resp']) + d) % 3
+                p.save()
+                self.build_settings()
+            return f
+
+        def cam(d):
+            def f(m=1):
+                p['cam_dist'] = (int(p['cam_dist']) + d) % 3
+                p.save()
+                self.apply_runtime()
+                self.build_settings()
+            return f
+
+        def tog(key):
+            def f(m=1):
+                p[key] = not p[key]
+                p.save()
+                self.build_settings()
+            return f
+        sn = [T('부드럽게', 'Smooth'), T('보통', 'Normal'), T('빠르게', 'Quick')]
+        cn = [T('가까이', 'Near'), T('보통', 'Normal'), T('멀리', 'Far')]
+        rows = [self.R('%s  < %s >' % (T('조향 반응', 'Steering response'), sn[int(p['steer_resp']) % 3]), steer(1), steer(-1), steer(1), id='c_steer'),
+                self.R('%s  < %s >' % (T('카메라 거리', 'Camera distance'), cn[int(p['cam_dist']) % 3]), cam(1), cam(-1), cam(1), id='c_cam'),
+                self.R('%s  < %s >' % (T('화면 흔들림', 'Camera shake'), self._onoff(p['shake'])), tog('shake'), tog('shake'), tog('shake'), id='c_shake'),
+                self.R('%s  < %s >' % (T('속도감 (속도에 따라 시야각 변화)', 'Speed effect (FOV with speed)'), self._onoff(p['speed_fx'])), tog('speed_fx'), tog('speed_fx'), tog('speed_fx'), id='c_sfx'),
+                self.I(T('키보드: ↑ 가속 · ↓ 브레이크/후진 · ←→ 조향 · Space/Shift 드리프트 · 1·2·3 아이템 (↓ 누른 채 = 뒤로) · R 복귀 · Esc 일시정지',
+                         'Keys: Up gas · Down brake · Left/Right steer · Space/Shift drift · 1·2·3 items (hold Down = back) · R reset · Esc pause'), scale=0.04),
+                self.I(T('게임패드: 왼쪽 스틱 조향 · RT 가속 · LT 브레이크 · A/RB 드리프트 · X·Y·B 아이템',
+                         'Gamepad: left stick steer · RT gas · LT brake · A/RB drift · X·Y·B items'), scale=0.04),
+                self.R(T('뒤로', 'Back'), lambda: self.settings_back(), id='back')]
+        self.menu.set(T('조작 · 카메라', 'Controls & camera'), rows, '', T('클릭/→ 다음 값 · 오른쪽 클릭/← 이전 값', 'Click/→ next · right-click/← previous'))
+
+    def build_set_game(self):
+        p = self.profile
+
+        def lang(m=1):
+            order = ['auto', 'ko', 'en']
+            p['lang'] = order[(order.index(p['lang']) + 1) % 3] if p['lang'] in order else 'auto'
+            global LANG
+            LANG = ('ko' if self.font else 'en') if p['lang'] == 'auto' else p['lang']
+            p.save()
+            self.build_settings()
+
+        def units(m=1):
+            p['units'] = 'mph' if p['units'] == 'kmh' else 'kmh'
+            p.save()
+            self.build_settings()
+
+        def clear_rec():
+            if getattr(self, '_rec_armed', False):
+                p['records'] = {}
+                p.save()
+                self._rec_armed = False
+            else:
+                self._rec_armed = True
+            self.build_settings()
+        ln = {'auto': T('자동', 'Auto'), 'ko': '한국어', 'en': 'English'}.get(p['lang'], p['lang'])
+        nrec = len(p['records']) if isinstance(p['records'], dict) else 0
+        rows = [self.R('%s  < %s >' % (T('언어 / Language', 'Language'), ln), lang, lang, lang, id='m_lang'),
+                self.R('%s  < %s >' % (T('속도 단위', 'Speed units'), 'km/h' if p['units'] == 'kmh' else 'mph'), units, units, units, id='m_units'),
+                self.R((T('정말 지울까요? (한 번 더)', 'Really clear? (again)') if getattr(self, '_rec_armed', False) else T('기록 모두 지우기', 'Clear all records')) + '  (%d)' % nrec,
+                       clear_rec, id='m_rec', enabled=nrec > 0),
+                self.R(T('뒤로', 'Back'), lambda: self.settings_back(), id='back')]
+        self.menu.set(T('게임', 'Game'), rows, '', '')
+
+
 # ============================================================================
 #  [PC] 게임 본체: 장면(메뉴/솔로/차고/설정/멀티/로비/레이스/결과) + 메인 루프
 # ============================================================================
@@ -8123,24 +9186,75 @@ def wrap_map(m):
 ITEM_KEYS_PC = {'1': 0, '2': 1, '3': 2, 'face_x': 0, 'face_y': 1, 'face_b': 2}
 
 
-class Game(ShowBase):
+def _icon_px(u, v):
+    """아이콘 한 점의 색 (u, v = 0~1): 어두운 둥근 사각형 + 주황 원 + 체크무늬 깃발 + 속도선"""
+    du, dv = abs(u - 0.5), abs(v - 0.5)
+    cr = 0.2
+    if du > 0.5 - cr and dv > 0.5 - cr and math.hypot(du - (0.5 - cr), dv - (0.5 - cr)) > cr:
+        return None
+    col = (0.06 + 0.1 * v, 0.07 + 0.03 * v, 0.2 + 0.12 * v)
+    d = math.hypot(u - 0.5, v - 0.47)
+    if d < 0.38:
+        k = 1.0 - d / 0.38
+        col = (1.0, 0.42 + 0.3 * k, 0.08 + 0.1 * k)
+    if 0.24 < u < 0.76:
+        fv = v - 0.035 * math.sin((u - 0.24) * 2 * math.pi)        # 바람에 펄럭이는 깃발
+        if 0.27 < fv < 0.6:
+            cx, cy = int((u - 0.24) / 0.0867), int((fv - 0.27) / 0.0825)
+            c = 0.97 if (cx + cy) % 2 == 0 else 0.07
+            col = (c, c, c)
+    if 0.2 < u < 0.235 and 0.25 < v < 0.84:                      # 깃대
+        col = (0.85, 0.87, 0.95)
+    for i, (y0, x0) in enumerate(((0.7, 0.36), (0.76, 0.44), (0.82, 0.52))):
+        if abs(v - y0) < 0.014 and x0 < u < 0.82:                # 속도선
+            col = (1.0, 0.95, 0.85)
+    return col
+
+
+def draw_icon(n=64, ss=2):
+    """게임 아이콘 그림 (창 아이콘 + 배포용 아이콘 공용). ss = 한 칸을 몇 번 나눠 찍어 테두리를 부드럽게"""
+    from panda3d.core import PNMImage
+    img = PNMImage(n, n, 4)
+    img.fill(0, 0, 0)
+    img.alphaFill(0)
+    inv = 1.0 / (n * ss)
+    for y in range(n):
+        for x in range(n):
+            r = g = b = a = 0.0
+            for sy in range(ss):
+                for sx in range(ss):
+                    c = _icon_px((x * ss + sx + 0.5) * inv, (y * ss + sy + 0.5) * inv)
+                    if c is not None:
+                        r += c[0]
+                        g += c[1]
+                        b += c[2]
+                        a += 1.0
+            if a > 0:
+                img.setXelA(x, y, r / a, g / a, b / a, a / (ss * ss))
+    return img
+
+
+class Game(ShowBase, SettingsMixin):
     def __init__(self, args):
         global LANG
         self.args = args
         offscreen = bool(os.environ.get('KART3D_OFFSCREEN')) or bool(args.get('offscreen'))
-        w, h = args.get('window', (1280, 720))
-        cfg = ['window-title TURBO KART 3D', 'win-size %d %d' % (w, h), 'sync-video 1', 'framebuffer-multisample 1', 'multisamples 4']
-        if args.get('fullscreen'):
-            cfg.append('fullscreen 1')
+        self.profile = Profile()
+        gfx_sync(self.profile)
+        cfg = ['window-title TURBO KART 3D'] + startup_cfg(self.profile, args)
         if offscreen:
             cfg += ['window-type offscreen', 'load-display p3tinydisplay', 'audio-library-name null']
+        else:
+            cfg += ['aux-display p3tinydisplay']     # OpenGL 창을 못 열면 소프트웨어 렌더러로라도 실행
         loadPrcFileData('', '\n'.join(cfg))
         ShowBase.__init__(self)
         self.offscreen = offscreen
+        self.start_msaa = int(self.profile['msaa'])
+        self.start_vsync = bool(self.profile['vsync'])
         self.disableMouse()
-        self.render.setAntialias(AntialiasAttrib.MAuto)
+        self.render.setAntialias(AntialiasAttrib.MAuto if self.start_msaa > 0 else AntialiasAttrib.MNone)
         self.camLens.setNearFar(0.4, 6000.0)
-        self.profile = Profile()
+        self.set_window_icon()
         if args.get('port'):
             self.profile['port'] = args['port']
         path = find_korean_font()
@@ -8214,8 +9328,15 @@ class Game(ShowBase):
             self.accept(k + '-up', self._kup, [k])
             self.accept(k + '-repeat', self._krep, [k])
         self.accept('keystroke', self._keystroke)
+        for ev, kind in (('mouse1', 'l'), ('mouse1-up', 'lu'), ('mouse3', 'r'), ('mouse3-up', 'ru'), ('wheel_up', 'wu'), ('wheel_down', 'wd')):
+            self.accept(ev, self.on_mouse, [kind])
+        self.last_mouse = None
+        self.apply_runtime()
+        if self.profile['display'] == 'borderless':
+            self.apply_display()
         self.taskMgr.add(self.tick, 'tick')
         self.go('menu')
+        self.audio.music('menu', 0)
 
     # ------------------------------------------------------------------ 입력 처리
     def _kdown(self, k):
@@ -8266,7 +9387,10 @@ class Game(ShowBase):
             elif k == 'r' and self.race:
                 self.race.respawn_local()
             elif k == 'escape':
-                self.toggle_pause()
+                if self.paused and getattr(self, 'settings_from_pause', False):
+                    self.settings_back()
+                else:
+                    self.toggle_pause()
             elif k == 'm':
                 self.audio.enabled = not self.audio.enabled
                 self.hud.say(T('소리 켬', 'Sound on') if self.audio.enabled else T('소리 끔', 'Sound off'), 0.8)
@@ -8294,13 +9418,17 @@ class Game(ShowBase):
         sc = self.scene
         if sc == 'menu':
             self.userExit()
-        elif sc in ('solo', 'garage', 'settings', 'multi', 'maps'):
+        elif sc == 'settings':
+            self.settings_back()
+        elif sc in ('solo', 'garage', 'multi', 'maps'):
             self.profile.save()
             self.go('menu')
         elif sc == 'mapitem':
             self.go('maps')
         elif sc == 'editor':
             self.maker.try_exit()
+        elif sc == 'about':
+            self.go('menu')
         elif sc == 'lobby':
             self.session.leave()
             self.go('menu')
@@ -8400,6 +9528,8 @@ class Game(ShowBase):
         self.scene = scene
         self.err = ''
         self.menu.clear_extra()
+        if scene not in ('race', 'results'):
+            self.audio.music('menu', 0)
         if scene != 'editor':
             self.maker.leave_ui()
         if scene != 'race':
@@ -8415,7 +9545,12 @@ class Game(ShowBase):
         elif scene == 'garage':
             self.build_garage()
         elif scene == 'settings':
+            if getattr(self, 'set_page', None) is None or not getattr(self, '_settings_keep', False):
+                self.set_page = 'main'
+            self._settings_keep = False
             self.build_settings()
+        elif scene == 'about':
+            self.build_about()
         elif scene == 'multi':
             self.scan_rooms()
             self.build_multi()
@@ -8434,12 +9569,67 @@ class Game(ShowBase):
                 self.R(T('WiFi 멀티플레이', 'WiFi multiplayer'), lambda: self.go('multi'), kind='primary', id='multi'),
                 self.R(T('맵 만들기 (내 맵 %d개)' % len(self.store.maps), 'Map maker (%d maps)' % len(self.store.maps)), lambda: self.go('maps'), id='maps'),
                 self.R(T('차고 (카트 꾸미기)', 'Garage (customize)'), lambda: self.go('garage'), id='garage'),
-                self.R(T('설정', 'Settings'), lambda: self.go('settings'), id='settings'),
+                self.R(T('설정 (그래픽 · 화면 · 소리 · 조작)', 'Settings (graphics · display · audio · controls)'), lambda: self.open_settings(), id='settings'),
+                self.R(T('게임 정보', 'About'), lambda: self.go('about'), id='about'),
                 self.R(T('종료', 'Quit'), self.userExit, id='quit')]
         if self.err:
             rows.append(self.I(self.err, (1, 0.5, 0.5, 1)))
         rows.append(self.I('%s  #%d' % (kart_name(self.profile['kart'], LANG), int(self.profile['kart']) + 1), scale=0.045))
-        self.menu.set('TURBO KART 3D', rows, T('맵·바이옴 1000종 · 카트 100,000종 · 아이템 100종 · WiFi 멀티', '1000 maps & biomes · 100,000 karts · 100 items · WiFi multiplayer'), T('↑↓ 선택   Enter 확인   F11 전체화면', 'Up/Down select   Enter OK   F11 fullscreen'))
+        self.menu.set('TURBO KART 3D', rows, T('맵·바이옴 1000종 · 카트 100,000종 · 아이템 100종 · 맵 만들기 · WiFi 멀티', '1000 maps & biomes · 100,000 karts · 100 items · map maker · WiFi multiplayer'),
+                      T('마우스 또는 ↑↓ Enter   ·   F11 전체 화면', 'Mouse or arrows + Enter   ·   F11 fullscreen'))
+
+    def build_about(self):
+        rows = [self.I('TURBO KART 3D  v%s' % VERSION, (1, 0.69, 0.13, 1), 0.07),
+                self.I(T('맵·바이옴 1000종 · 카트 100,000종 · 아이템 100종 · 맵 만들기 · 최대 12명 WiFi 멀티 (폰↔PC)',
+                         '1000 maps & biomes · 100,000 karts · 100 items · map maker · up to 12 players over WiFi (phone↔PC)'), scale=0.045),
+                self.I(T('엔진: Panda3D (PC) · pygame (폰)    음악·효과음: 게임 안에서 코드로 합성', 'Engine: Panda3D (PC) · pygame (phone)    Music & SFX: synthesized in code'), scale=0.045),
+                self.I(T('저장 파일: kart3d_profile.json (설정·기록) · kart3d_maps.json (내 맵)', 'Save files: kart3d_profile.json (settings, records) · kart3d_maps.json (my maps)'), scale=0.045),
+                self.I(T('기록이 있는 맵: %d개' % len(self.profile['records']), 'Maps with records: %d' % len(self.profile['records'])) if isinstance(self.profile['records'], dict) else '', scale=0.045),
+                self.R(T('뒤로', 'Back'), lambda: self.go('menu'), id='back')]
+        self.menu.set(T('게임 정보', 'About'), rows, '', '')
+
+    def set_window_icon(self):
+        """창 아이콘 - PNG 를 만들어서 지정"""
+        if self.offscreen:
+            return
+        try:
+            path = os.path.join(tempfile.gettempdir(), 'kart3d_icon_v2.png')
+            if not os.path.isfile(path):
+                draw_icon(64).write(Filename.fromOsSpecific(path))
+            props = WindowProperties()
+            props.setIconFilename(Filename.fromOsSpecific(path))
+            self.win.requestProperties(props)
+        except Exception:
+            pass
+
+    def mouse_pos(self):
+        mw = self.mouseWatcherNode
+        if mw is None or not mw.hasMouse():
+            return None
+        m = mw.getMouse()
+        return (m.getX() * self.getAspectRatio(), m.getY())
+
+    def on_mouse(self, kind):
+        """마우스 버튼/휠: 편집기면 편집기로, 메뉴가 떠 있으면 메뉴로"""
+        if self.input.active:
+            return
+        if self.scene == 'editor':
+            mk = self.maker
+            if kind == 'l':
+                mk.on_down()
+            elif kind == 'lu':
+                mk.on_up()
+            elif kind == 'r':
+                mk.on_rdown()
+            elif kind == 'ru':
+                mk.on_rup()
+            elif kind in ('wu', 'wd'):
+                mk.on_wheel(1 if kind == 'wu' else -1)
+            return
+        if self.scene == 'race' and not self.paused:
+            return
+        if self.menu.visible and kind in ('l', 'r', 'wu', 'wd'):
+            self.menu.mouse(kind, self.mouse_pos(), self.mult())
 
     # ---- 솔로 ----
     def draw_outline(self, mid):
@@ -8556,16 +9746,18 @@ class Game(ShowBase):
             self.start_solo()
 
         def mode(m=1):
-            self.profile['mode'] = 'speed' if self.profile['mode'] == 'item' else 'item'
+            order = ['speed', 'item', 'time']
+            cur = self.profile['mode'] if self.profile['mode'] in order else 'item'
+            self.profile['mode'] = order[(order.index(cur) + (1 if m >= 0 else -1)) % 3]
             self.profile.save()
             self.build_solo()
-        mname = T('아이템전 (아이템 100종)', 'Item battle (100 items)') if self.profile['mode'] == 'item' else T('스피드전', 'Speed race')
+        mname = self.mode_name()
 
         def src(m=1):
             self.profile['map_src'] = 'custom'
             self.profile.save()
             self.build_solo()
-        rows = [self.R('%s  < %s >' % (T('모드', 'Mode'), mname), mode, mode, mode, id='mode'),
+        rows = [self.R('%s  < %s >' % (T('모드', 'Mode'), mname), mode, lambda m=1: mode(-1), mode, id='mode'),
                 self.R('%s  < %s >' % (T('맵 종류', 'Maps'), T('기본 맵 1000개', 'Built-in 1000')), src, src, src, id='src'),
                 self.R('%s  < #%d / %d >' % (T('맵', 'Map'), mid, MAP_COUNT), typemap, chg(-1), chg(1), id='map'),
                 self.R('%s  < %s (%d/%d) >' % (T('바이옴', 'Biome'), fname, fam + 1, BIOME_FAMILIES), None, setpart(0, -1), setpart(0, 1), id='theme'),
@@ -8575,13 +9767,15 @@ class Game(ShowBase):
                 self.R('%s  < %d >' % (T('AI 상대', 'AI rivals'), int(self.profile['bots'])), None, bots(-1), bots(1), id='bots'),
                 self.R(T('출발!', 'START!'), start, kind='primary', id='start'),
                 self.R(T('뒤로', 'Back'), lambda: self.back(), id='back')]
-        self.menu.set(T('솔로 레이스', 'Solo race'), rows, '%s  ·  %s' % (name, theme),
+        self.menu.set(T('솔로 레이스', 'Solo race'), rows, '%s  ·  %s   |   %s' % (name, theme, self.rec_text(mid, int(self.profile['laps']))),
                       T('←→ ±1   Shift ±10   Ctrl ±100   R 랜덤   T 바이옴   Enter(맵) 번호 입력', 'Left/Right ±1   Shift ±10   Ctrl ±100   R random   T biome   Enter on map: type number'))
         self.draw_outline(mid)
 
     def build_solo_custom(self):
         def mode(m=1):
-            self.profile['mode'] = 'speed' if self.profile['mode'] == 'item' else 'item'
+            order = ['speed', 'item', 'time']
+            cur = self.profile['mode'] if self.profile['mode'] in order else 'item'
+            self.profile['mode'] = order[(order.index(cur) + (1 if m >= 0 else -1)) % 3]
             self.profile.save()
             self.build_solo()
 
@@ -8605,9 +9799,9 @@ class Game(ShowBase):
         def start():
             self.profile.save()
             self.start_solo()
-        mname = T('아이템전 (아이템 100종)', 'Item battle (100 items)') if self.profile['mode'] == 'item' else T('스피드전', 'Speed race')
+        mname = self.mode_name()
         crows, d = self.custom_rows()
-        rows = [self.R('%s  < %s >' % (T('모드', 'Mode'), mname), mode, mode, mode, id='mode'),
+        rows = [self.R('%s  < %s >' % (T('모드', 'Mode'), mname), mode, lambda m=1: mode(-1), mode, id='mode'),
                 self.R('%s  < %s >' % (T('맵 종류', 'Maps'), T('내가 만든 맵 (%d)' % len(self.store.maps), 'My maps (%d)' % len(self.store.maps))), src, src, src, id='src')]
         rows += crows
         if d is not None:
@@ -8620,7 +9814,7 @@ class Game(ShowBase):
         sub = ''
         if d is not None:
             th = biome(d['look'])
-            sub = u'\u2605 %s  ·  %s' % (d['name'], th['name'] if LANG == 'ko' else th['en'])
+            sub = u'\u2605 %s  ·  %s   |   %s' % (d['name'], th['name'] if LANG == 'ko' else th['en'], self.rec_text(d, int(self.profile['laps'])))
         self.menu.set(T('솔로 레이스', 'Solo race'), rows, sub, T('←→ 값 변경   Enter 확인', 'Left/Right change   Enter OK'))
         if d is not None:
             self.draw_outline(d)
@@ -8772,37 +9966,6 @@ class Game(ShowBase):
             Bar(self.menu.extra, x0 + 0.3, z + 0.9 - 0.005, 0.5, 0.035, (1, 0.69, 0.13, 1)).set(st[key] / 10.0)
 
     # ---- 설정 ----
-    def build_settings(self):
-        def lang():
-            order = ['auto', 'ko', 'en']
-            self.profile['lang'] = order[(order.index(self.profile['lang']) + 1) % 3]
-            global LANG
-            LANG = ('ko' if self.font else 'en') if self.profile['lang'] == 'auto' else self.profile['lang']
-            self.profile.save()
-            self.build_settings()
-
-        def snd():
-            self.profile['sound'] = not self.profile['sound']
-            self.audio.enabled = bool(self.profile['sound'])
-            self.profile.save()
-            self.build_settings()
-
-        def fps():
-            self.show_fps = not self.show_fps
-            self.build_settings()
-
-        def steer_resp():
-            self.profile['steer_resp'] = (int(self.profile['steer_resp']) + 1) % 3
-            self.profile.save()
-            self.build_settings()
-        sn = [T('부드럽게', 'Smooth'), T('보통', 'Normal'), T('빠르게', 'Quick')]
-        rows = [self.R('%s: %s' % (T('언어 / Language', 'Language'), self.profile['lang']), lang, id='lang'),
-                self.R('%s: %s' % (T('소리', 'Sound'), 'ON' if self.profile['sound'] else 'OFF'), snd, id='snd'),
-                self.R('%s: %s' % (T('조향 반응', 'Steering'), sn[int(self.profile['steer_resp']) % 3]), steer_resp, id='steer'),
-                self.R('FPS: %s' % ('ON' if self.show_fps else 'OFF'), fps, id='fps'),
-                self.R(T('완료', 'Done'), lambda: self.back(), id='done')]
-        self.menu.set(T('설정', 'Settings'), rows, '', T('Enter 로 값 변경', 'Enter to change'))
-
     # ---- 멀티플레이 ----
     def scan_rooms(self):
         if not self.scan.get('busy'):
@@ -8952,6 +10115,24 @@ class Game(ShowBase):
             self._lobby_map = key
 
     # ------------------------------------------------------------------ 레이스
+    def mode_name(self):
+        m = self.profile['mode']
+        if m == 'item':
+            return T('아이템전 (아이템 100종)', 'Item battle (100 items)')
+        if m == 'time':
+            return T('타임 어택 (혼자 · 기록 도전)', 'Time attack (solo · records)')
+        return T('스피드전', 'Speed race')
+
+    def rec_text(self, ref, laps):
+        r = rec_get(self.profile, ref)
+        parts = []
+        if isinstance(r.get('lap'), (int, float)):
+            parts.append(T('최고 랩 ', 'Best lap ') + fmt_time(r['lap']))
+        rk = r.get('race%d' % int(laps))
+        if isinstance(rk, (int, float)):
+            parts.append(T('%d바퀴 최고 ' % int(laps), 'Best %d laps ' % int(laps)) + fmt_time(rk))
+        return '   '.join(parts) if parts else T('아직 기록 없음', 'No records yet')
+
     def solo_map(self):
         if self.test_map is not None:
             return self.test_map
@@ -8963,10 +10144,13 @@ class Game(ShowBase):
 
     def start_solo(self):
         p = self.profile
-        entries = solo_entries(p.display_name(), p['kart'], int(p['bots']))
+        ta = p['mode'] == 'time'
+        entries = solo_entries(p.display_name(), p['kart'], 0 if ta else int(p['bots']))
         ref = self.solo_map()
         self.start_race(ref, int(p['laps']) if self.test_map is None else int(ref['laps']), entries, False, True,
                         5.0 if self.test_map is None else 3.0, p['mode'] == 'item')
+        if ta and self.race is not None:
+            self.hud.say(self.rec_text(ref, self.race.laps), 5.0, False, (1, 0.9, 0.5, 1))
 
     def use_item(self, slot):
         if self.race is not None and self.race.items is not None and not (self.paused and not self.race.multi):
@@ -8989,11 +10173,13 @@ class Game(ShowBase):
         self.nodes = {rc.id: KartNode(self, rc, self.world.root) for rc in self.race.racers}
         self.particles = Particles(self)
         wk = self.race.track.theme.get('weather')
-        self.weather = Weather(self, wk, self.race.track.theme.get('wcol')) if wk else None
+        self.weather = Weather(self, wk, self.race.track.theme.get('wcol')) if (wk and GFX.get('weather_k', 1.0) > 0) else None
+        self.audio.music('race', music_seed(map_id))
+        self.audio.music_rate(1.0)
         self.hud.build_minimap(self.race.track)
         self.hud.mapname.setText(map_title(map_id, LANG))
         self.hud.show(True)
-        self.chase = ChaseCam()
+        self.chase.reset()                 # 설정한 카메라 거리(k)는 그대로 두고 위치만 처음부터
         self.steer = 0.0
         self.paused = False
         self.finish_at = None
@@ -9015,6 +10201,7 @@ class Game(ShowBase):
             rows = [self.R(T('계속하기', 'Resume'), self.toggle_pause, kind='primary', id='resume')]
             if not self.race.multi:
                 rows.append(self.R(T('다시 시작', 'Restart'), lambda: (setattr(self, 'paused', False), self.start_solo()), id='restart'))
+            rows.append(self.R(T('설정 (그래픽 · 소리 · 조작)', 'Settings (graphics · audio · controls)'), lambda: self.open_settings('main', True), id='psettings'))
             rows.append(self.R(T('나가기', 'Quit'), self.leave_race, id='quit'))
             self.menu.show(True)
             self.menu.set(T('일시정지', 'Paused'), rows, '', '')
@@ -9071,8 +10258,15 @@ class Game(ShowBase):
                 self.audio.play('go')
                 self.hud.say('GO!', 1.0, True)
             elif kind == 'lap':
-                self.hud.say('FINAL LAP!' if ev[2] else 'LAP %d' % ev[1], 1.6)
+                last = race.lap_times[-1] if race.lap_times else None
+                best = last is not None and last <= min(race.lap_times)
+                txt = ('FINAL LAP!' if ev[2] else 'LAP %d/%d' % (ev[1], race.laps))
+                if last is not None:
+                    txt += '   %s%s' % (u'\u2605 ' if best and len(race.lap_times) > 1 else '', fmt_time(last))
+                self.hud.say(txt, 2.0, False, (1, 0.86, 0.3, 1) if (best and len(race.lap_times) > 1) else (1, 0.8, 0.27, 1))
                 self.audio.play('lap')
+                if ev[2] and race.laps > 1:
+                    self.audio.music_rate(1.06)          # 마지막 바퀴: 음악이 살짝 빨라진다
             elif kind == 'finish':
                 self.hud.say('FINISH!', 3.0, True)
                 self.audio.play('finish')
@@ -9251,7 +10445,7 @@ class Game(ShowBase):
         # 카메라
         cp = self.chase.update(dt, loc, sim.stats['max_speed'])
         self.shake = max(0.0, self.shake - dt * 2.2)
-        sh = self.shake * 0.25 + (0.05 if loc.boosting else 0.0)
+        sh = (self.shake * 0.25 + (0.05 if loc.boosting else 0.0)) if self.profile['shake'] else 0.0
         pos = PV(cp[0] + (_random.random() - 0.5) * sh, cp[1] + (_random.random() - 0.5) * sh, cp[2] + (_random.random() - 0.5) * sh)
         yaw, pitch = cp[3], cp[4]
         d = PV(math.sin(yaw) * math.cos(pitch), -math.sin(pitch), math.cos(yaw) * math.cos(pitch))
@@ -9259,17 +10453,22 @@ class Game(ShowBase):
         self.camera.lookAt(Point3(pos[0] + d[0] * 20, pos[1] + d[1] * 20, pos[2] + d[2] * 20), Vec3(0, 0, 1))
         self.cam_pos, self.cam_fwd = pos, d          # 카메라 뒤 물체 갱신 생략용
         ratio = loc.speed / sim.stats['max_speed']
-        self.camLens.setFov(82 + clamp(ratio, 0, 1.2) * 8 + (6 if loc.boosting else 0))
+        fov = float(self.profile['fov'])
+        if self.profile['speed_fx']:
+            fov += clamp(ratio, 0, 1.2) * 8 + (6 if loc.boosting else 0)
+        self.camLens.setFov(fov)
         self.world.update(pos)
         if self.particles is not None:
             self.particles.update(dt if not self.paused else 0.0)
         if self.weather is not None:
             self.weather.update(dt, pos)
-        self.hud.update(race, time.time())
+        if self.scene != 'results':                 # 결과 화면에선 HUD 를 숨긴 채로 둔다
+            self.hud.update(race, time.time())
         if race.items is not None:
             if self.item_world is not None:
                 self.item_world.update(dt)
-            self.item_hud.update(race, self.t)
+            if self.scene != 'results':
+                self.item_hud.update(race, self.t)
             self.screen_fx.update(sim.blind_t, dt)
         self._fps_t = getattr(self, '_fps_t', 0.0) + dt
         if self._fps_t > 0.25:
@@ -9290,6 +10489,21 @@ class Game(ShowBase):
     def build_results(self):
         race = self.race
         rows = []
+        if race.local is not None and race.local.finished and not getattr(race, '_rec_done', False):
+            race._rec_done = True
+            if race.items is None:                    # 아이템전 기록은 저장 안 함
+                race._rec = rec_submit(self.profile, race.map_id, race.laps, race.lap_times, race.local.finish_time)
+        rec = getattr(race, '_rec', None)
+        if race.lap_times:
+            best = min(race.lap_times)
+            rows.append(self.I(T('이번 최고 랩 ', 'Best lap this race ') + fmt_time(best) + (T('   ★ 랩 신기록!', '   ★ NEW LAP RECORD!') if rec and rec[0] else ''),
+                               (1, 0.86, 0.3, 1) if rec and rec[0] else (0.8, 0.86, 1, 1), 0.05))
+        if rec and rec[1]:
+            rows.append(self.I(T('★ 완주 신기록!', '★ NEW RACE RECORD!'), (1, 0.86, 0.3, 1), 0.055))
+        if race.items is not None:
+            rows.append(self.I(T('(아이템전 기록은 저장하지 않아요 — 스피드전/타임 어택에서 기록 도전!)', '(Item battles do not set records — try Speed or Time attack)'), scale=0.04))
+        else:
+            rows.append(self.I(self.rec_text(race.map_id, race.laps), (0.75, 0.82, 0.95, 1), 0.045))
         for i, rc in enumerate(race.ranking()):
             me = rc is race.local
             rows.append(self.I('%2d  %-14s %s' % (i + 1, rc.name, fmt_time(rc.finish_time) if rc.finished else T('주행 중…', 'racing…')), (1, 0.72, 0.15, 1) if me else (0.95, 0.97, 1, 1), 0.052))
@@ -9301,8 +10515,10 @@ class Game(ShowBase):
         else:
             rows.append(self.R(T('다시 달리기', 'Race again'), self.start_solo, kind='primary', id='again'))
         rows.append(self.R(T('메뉴로', 'Menu'), self.leave_race, id='menu'))
+        self.hud.show(False)               # 결과 화면에서는 레이스 HUD 를 숨겨서 겹치지 않게
+        self.item_hud.show(False)
         self.menu.show(True)
-        self.menu.set(T('결과', 'Results'), rows, '', '')
+        self.menu.set(T('결과', 'Results'), rows, map_title(race.map_id, LANG), '')
 
     def leave_to_lobby(self):
         self.race = None
@@ -9316,7 +10532,13 @@ class Game(ShowBase):
         dt = self.dt_override if self.dt_override is not None else min(ClockObject.getGlobalClock().getDt(), 0.1)
         self.t += dt
         self.input.tick(dt)
+        self.audio.tick()
         sc = self.scene
+        if sc != 'editor' and self.menu.visible and not self.input.active:
+            mp = self.mouse_pos()
+            if mp is not None and mp != self.last_mouse:
+                self.last_mouse = mp
+                self.menu.hover(mp)
         if sc in ('multi',) and self.scan.get('done'):
             self.scan['done'] = False
             self.build_multi()
@@ -9493,11 +10715,6 @@ class PCMapMaker(object):
             n.setLightOff()
             n.setTransparency(TransparencyAttrib.MAlpha)
         self.need_cv = self.need_ui = True
-        if not self.events:
-            for ev, fn in (('mouse1', self.on_down), ('mouse1-up', self.on_up), ('mouse3', self.on_rdown), ('mouse3-up', self.on_rup),
-                           ('wheel_up', lambda: self.on_wheel(1)), ('wheel_down', lambda: self.on_wheel(-1))):
-                app.accept(ev, fn)
-            self.events = True
         if self.view is None:
             self.fit()
 
@@ -9507,10 +10724,6 @@ class PCMapMaker(object):
         self.root = self.cv_np = self.ov_np = self.ui_np = None
         self.buttons = []
         self.texts = {}
-        if self.events:
-            for ev in ('mouse1', 'mouse1-up', 'mouse3', 'mouse3-up', 'wheel_up', 'wheel_down'):
-                self.app.ignore(ev)
-            self.events = False
 
     def save(self):
         d = self.ed.result()
@@ -10300,6 +11513,7 @@ def main():
         if path:
             print('(같은 내용이 파일로도 저장되었습니다 / also saved to: %s)' % path)
         print('=' * 64)
+        _error_box(u'오류가 발생했습니다 / An error occurred.\n\n%s\n\n%s' % (path or '', text[-900:]))
         _wait_key()
         raise SystemExit(1)
     finally:

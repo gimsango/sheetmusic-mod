@@ -142,6 +142,8 @@ class Race(object):
         self.auto_local = auto_local
         self.count_left = countdown
         self.items = ItemSystem(self) if items else None
+        self.lap_start = 0.0          # 내 카트의 이번 바퀴 시작 시각
+        self.lap_times = []           # 내 카트의 바퀴별 시간 (기록용)
 
     def ev(self, e):
         self._pend.append(e)
@@ -215,6 +217,7 @@ class Race(object):
                     sim.finished = True
                     self.finish_order.append(rc)
                     if rc.kind == 'local':
+                        self.lap_times.append(self.t - self.lap_start)
                         self.ev(('finish',))
                         if self.net is not None and self.multi:
                             self.net.send({'t': 'fin', 'time': round(rc.finish_time, 2)})
@@ -223,6 +226,8 @@ class Race(object):
                     self.ev(('sim', e))
                 lap = min(self.laps, sim.lap)
                 if lap > self.last_lap and running:
+                    self.lap_times.append(self.t - self.lap_start)
+                    self.lap_start = self.t
                     self.ev(('lap', lap, lap == self.laps))
                     self.last_lap = lap
         if items is not None:

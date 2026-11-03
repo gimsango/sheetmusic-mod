@@ -26,6 +26,12 @@ import json
 import array
 import subprocess
 import random as _random
+
+for _st in (sys.stdout, sys.stderr):      # 콘솔이 한글을 못 쓰는 환경(ASCII)에서도 글자 출력 때문에 멈추지 않게
+    try:
+        _st.reconfigure(errors='backslashreplace')
+    except Exception:
+        pass
 from operator import itemgetter
 
 
@@ -49,7 +55,14 @@ def _crash_log(text):
         base = os.path.dirname(os.path.abspath(sys.argv[0])) if sys.argv and sys.argv[0] else '.'
     except Exception:
         base = '.'
-    for d in (base, os.path.expanduser('~'), '.'):
+    dirs = [base, os.path.expanduser('~'), '.']
+    try:
+        sd = globals().get('save_dirs')            # 설치판이면 사용자 폴더가 먼저 (프로그램 폴더는 쓰기 금지일 수 있음)
+        if sd is not None:
+            dirs = [d or '.' for d in sd()] + dirs
+    except Exception:
+        pass
+    for d in dirs:
         try:
             path = os.path.join(d, 'kart3d_error.txt')
             with open(path, 'a', encoding='utf-8') as f:

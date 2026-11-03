@@ -1,0 +1,2 @@
+# 배포용 빌드(setup.py build_apps)가 플랫폼별로 내려받을 패키지
+panda3d>=1.10.14

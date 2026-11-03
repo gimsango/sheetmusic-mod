@@ -281,17 +281,7 @@ class MapStore(object):
         self.load()
 
     def _candidates(self):
-        out = []
-        try:
-            out.append(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv and sys.argv[0] else __file__)), self.filename))
-        except Exception:
-            pass
-        try:
-            out.append(os.path.join(os.path.expanduser('~'), self.filename))
-        except Exception:
-            pass
-        out.append(self.filename)
-        return out
+        return [os.path.join(d, self.filename) if d else self.filename for d in save_dirs()]
 
     def load(self):
         for p in self._candidates():
