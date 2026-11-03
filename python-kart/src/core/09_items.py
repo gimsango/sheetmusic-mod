@@ -476,6 +476,13 @@ class ItemSystem(object):
         N = tr.N
         rows = int(clamp(tr.length / 420.0, 4, 8))
         r = Rng(tr.info['seed'] ^ 0x1717)
+        if tr.box_rows is not None:              # 맵 만들기에서 직접 놓은 상자 줄
+            for idx in tr.box_rows:
+                for j in range(4):
+                    d = tr.hw * (-0.66 + 0.44 * j)
+                    x, y, z, h = tr.pose_at(idx, d)
+                    self.boxes.append({'x': x, 'y': y + 1.15, 'z': z, 'idx': idx, 't': 0.0, 'ph': r() * TAU, 'h': h})
+            return
         pads = [p['idx'] for p in tr.pads]
         for k in range(rows):
             idx = int(((k + 0.35 + r() * 0.3) / rows) * N)

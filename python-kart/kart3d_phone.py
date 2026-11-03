@@ -1309,7 +1309,7 @@ def min_separation(poly, ds):
     return math.sqrt(best)
 
 
-def relax_corners(poly, max_ang=0.19, iters=60, spacing=4.0):
+def relax_corners(poly, max_ang=0.19, iters=60, spacing=4.0, min_n=220):
     n = len(poly)
     pts = [list(p) for p in poly]
     changed = False
@@ -1342,7 +1342,7 @@ def relax_corners(poly, max_ang=0.19, iters=60, spacing=4.0):
         pts = new
     if not changed:
         return poly
-    return resample_closed([tuple(p) for p in pts], spacing)
+    return resample_closed([tuple(p) for p in pts], spacing, min_n)
 
 
 class Q(object):
@@ -1368,23 +1368,34 @@ class Track(object):
     SH = 12.0   # 갓길(잔디) 폭 - 그 바깥이 벽
 
     def __init__(self, map_id, outline_only=False):
-        self.info = map_info(map_id)
-        self.theme = biome(map_id)
-        r = Rng(self.info['seed'])
-        self.width = 15.0 + int(r() * 5)
-        self.hw = self.width / 2.0
-        hw, SH = self.hw, self.SH
-        self.wall_off = hw + SH - 0.6
-        # (가로 오프셋, 높이 변화): 도로 -> 연석 -> 갓길 -> 비탈
-        self.rows = [(hw, 0.0), (hw + 0.7, -0.14), (hw + SH, -0.25), (hw + SH + 40.0, -2.5), (hw + SH + 200.0, -30.0)]
-        self._centerline(r)
+        """map_id: 기본 맵 번호(1~1000) 또는 '맵 만들기'로 만든 맵 데이터(dict)"""
         self.props = []
         self.props_by_seg = {}
         self.pads = []
         self.lamps = []
         self.arches = []
+        self.obstacles = []          # 길 위(벽 안쪽)에 놓인 단단한 물체 [(x, z, 반지름, 인덱스, 가로 오프셋)]
+        self.obs_near = {}           # 트랙 인덱스 -> 그 근처 장애물 목록 (충돌/봇 회피용)
+        self.box_rows = None         # 아이템 상자 줄 위치 (None = 자동)
+        self.custom = None
+        if isinstance(map_id, dict):
+            self._init_custom(map_id, outline_only)
+            return
+        self.info = map_info(map_id)
+        self.theme = biome(map_id)
+        r = Rng(self.info['seed'])
+        self._set_width(15.0 + int(r() * 5))
+        self._centerline(r)
         if not outline_only:
             self._decorate(r)
+
+    def _set_width(self, width):
+        self.width = width
+        self.hw = self.width / 2.0
+        hw, SH = self.hw, self.SH
+        self.wall_off = hw + SH - 0.6
+        # (가로 오프셋, 높이 변화): 도로 -> 연석 -> 갓길 -> 비탈
+        self.rows = [(hw, 0.0), (hw + 0.7, -0.14), (hw + SH, -0.25), (hw + SH + 40.0, -2.5), (hw + SH + 200.0, -30.0)]
 
     # ---- 중심선 -----------------------------------------------------------
     def _centerline(self, r):
@@ -1437,6 +1448,103 @@ class Track(object):
             if s < best_s:
                 best_s, best_i = s, i
         poly = poly[best_i:] + poly[:best_i]
+        self._setup_poly(poly)
+
+    # ---- 맵 만들기로 만든 맵 ------------------------------------------------------------
+    def _init_custom(self, data, outline_only):
+        d = cmap_clean(data) or cmap_new()
+        self.custom = d
+        seed = cmap_key(d)
+        th = cmap_theme(d)
+        self.theme = th
+        self.info = dict(id=0, seed=seed, theme=th['family'], variant=0, name=d['name'], name_en=d['name'],
+                         theme_name=th['name'], theme_en=th['en'], family_name=th['family_ko'], family_en=th['family_en'], custom=True)
+        r = Rng(seed)
+        self._set_width(float(d['width']))
+        pts = d['pts']
+        K = len(pts)
+        amp = 30.0 * d['hills']
+        ph = (r() * TAU, r() * TAU, r() * TAU)
+        cps = []
+        for i, p in enumerate(pts):
+            t = i / float(K)
+            y = p[2] + amp * (math.sin(TAU * t + ph[0]) * 0.6 + math.sin(2 * TAU * t + ph[1]) * 0.3 + math.sin(3 * TAU * t + ph[2]) * 0.18)
+            cps.append((p[0], y, p[1]))
+        poly = resample_closed(catmull_closed(cps, 24), 4.0, 60)
+        # 너무 급한 꺾임은 달릴 수 있게 둥글게 (그린 모양은 최대한 유지)
+        for _ in range(6):
+            if max_turn_angle(poly) <= 0.21:
+                break
+            poly = relax_corners(poly, min_n=60)
+        self._setup_poly(poly)
+        if outline_only:
+            return
+        if d['pads']:
+            self._auto_pads(r)
+        dk = CMAP_DECO_K[d['deco']]
+        if dk > 0:
+            self._auto_props(r, dk)
+        self._place_objs(d, seed)
+        self._finish_props()
+        if d['deco'] > 0:
+            self._theme_extras()
+
+    def _place_objs(self, d, seed):
+        """직접 놓은 물건: 장식물/장애물(충돌) / 부스트·점프·기름 발판 / 아이템 상자 줄"""
+        q = Q()
+        N = self.N
+        hw = self.hw
+        boxes = []
+        for n, o in enumerate(d['objs']):
+            kind, x, z, s, rot = o[0], o[1], o[2], o[3], o[4]
+            info = OBJ_INFO[kind]
+            self.query(x, z, -1, q)
+            idx = int(round(q.prog)) % N
+            dd = q.d
+            if info['cat'] == 'road':
+                if abs(dd) > hw + 1.5:
+                    continue                      # 길 밖의 발판/상자는 쓰지 않음
+                if kind == 'box':
+                    boxes.append(idx)
+                    continue
+                if kind == 'jump':
+                    hl, hwp = 3.2 * s, 3.4 * s
+                elif kind == 'oil':
+                    hl, hwp = 3.4 * s, 2.6 * s
+                else:
+                    hl, hwp = 4.5 * s, 2.8 * s
+                hwp = min(hwp, hw)
+                pad = dict(idx=idx, d=clamp(dd, -hw + hwp, hw - hwp), half_len=hl, half_w=hwp)
+                if kind != 'pad':
+                    pad['kind'] = kind
+                self.pads.append(pad)
+                continue
+            rr = Rng((seed ^ hash32(n * 7 + 3)) & 0xFFFFFFFF)
+            r1, r2, r3 = rr(), rr(), rr()
+            if kind == 'building':                # 빌딩은 크기 조절값으로 폭/높이를 정한다
+                k = clamp((s - 0.3) / 2.7, 0.0, 1.0)
+                r1 = r2 = k
+                r3 = math.sqrt(k)
+                rad = (14 + r1 * 22) * 0.45
+            else:
+                rad = info['rad'] * s
+            y = q.y if abs(dd) <= hw + 0.7 else q.y - 0.15
+            self.props.append(dict(kind=kind, x=x, y=y, z=z, rot=rot, s=s, r1=r1, r2=r2, r3=r3, seg=idx, user=True))
+            if rad > 0 and abs(dd) - rad < self.wall_off:
+                self.obstacles.append((x, z, rad, idx, dd))
+        if boxes:
+            rows = []
+            for i in sorted(set(boxes)):
+                if not rows or i - rows[-1] > 3:
+                    rows.append(i)
+            self.box_rows = rows
+        for ob in self.obstacles:
+            span = int(ob[2] / self.ds) + 4
+            for k in range(-span, span + 1):
+                self.obs_near.setdefault((ob[3] + k) % N, []).append(ob)
+
+    def _setup_poly(self, poly):
+        """재샘플된 닫힌 중심선(점 간격 약 4m) -> 방향/오른쪽 벡터/길이/뱅킹/커브 강도"""
         N = len(poly)
         self.N = N
         self.px = [p[0] for p in poly]
@@ -1492,10 +1600,13 @@ class Track(object):
 
     # ---- 장식물/패드 ---------------------------------------------------------
     def _decorate(self, r):
-        th = self.theme
+        self._auto_pads(r)
+        self._auto_props(r, 1.0)
+        self._finish_props()
+        self._theme_extras()
+
+    def _auto_pads(self, r):
         N = self.N
-        px, pz, py, rx, rz = self.px, self.pz, self.py, self.rx, self.rz
-        # 부스트 패드
         count = 6 + int(r() * 5)
         for k in range(count):
             idx = int(((k + 0.5 + (r() - 0.5) * 0.4) / count) * N)
@@ -1503,7 +1614,12 @@ class Track(object):
             if idx < 14 or idx > N - 8:
                 continue
             self.pads.append(dict(idx=idx, d=d, half_len=4.5, half_w=2.8))
-        # 장식물
+
+    def _auto_props(self, r, density):
+        """벽 바깥에 바이옴 장식물을 흩뿌린다 (density 1 = 기본 맵과 같은 양)"""
+        th = self.theme
+        N = self.N
+        px, pz, py, rx, rz = self.px, self.pz, self.py, self.rx, self.rz
         cell = 60.0
         grid = {}
         for i in range(0, N, 2):
@@ -1524,7 +1640,7 @@ class Track(object):
                                 return False
             return True
         total = sum(w for _, w in th['props'])
-        want = int(round(N * 2.1))
+        want = int(round(N * 2.1 * density))
         for _ in range(want):
             i = int(r() * N)
             side = 1 if r() < 0.5 else -1
@@ -1545,8 +1661,14 @@ class Track(object):
             s = 0.7 + r() * 0.9
             r1, r2, r3 = r(), r(), r()
             self.props.append(dict(kind=kind, x=x, y=y, z=z, rot=rot, s=s, r1=r1, r2=r2, r3=r3, seg=i))
+
+    def _finish_props(self):
         for p in self.props:
             self.props_by_seg.setdefault(p['seg'], []).append(p)
+
+    def _theme_extras(self):
+        th = self.theme
+        N = self.N
         if th.get('lamps'):
             k = 0
             for i in range(4, N, 7):
@@ -2132,6 +2254,39 @@ class KartSim(object):
                         self.vz -= dz / dist * rel * 0.9
                         ev.append('bump')
 
+        # 맵 만들기 장애물 (원 기둥과 충돌) - 높이 뛰어 있거나 유령이면 통과
+        if t.obs_near and self.air_y < 0.9 and self.ghost_t <= 0:
+            obs = t.obs_near.get(self.hint)
+            if obs:
+                kr = 1.15 * (1.5 if self.giant_t > 0 else (0.7 if self.shrink_t > 0 else 1.0))
+                for ob in obs:
+                    dx = self.x - ob[0]
+                    dz = self.z - ob[1]
+                    rr = ob[2] + kr
+                    d2 = dx * dx + dz * dz
+                    if d2 < rr * rr:
+                        dist = math.sqrt(d2)
+                        if dist < 1e-4:
+                            nx, nz = -fx, -fz
+                        else:
+                            nx, nz = dx / dist, dz / dist
+                        self.x = ob[0] + nx * rr
+                        self.z = ob[1] + nz * rr
+                        vn = self.vx * nx + self.vz * nz
+                        if vn < 0:
+                            self.vx -= nx * vn * 1.45
+                            self.vz -= nz * vn * 1.45
+                            k = 1 - clamp(-vn / 70.0, 0.05, 0.3)
+                            self.vx *= k
+                            self.vz *= k
+                            if vn < -6:
+                                self.wall_hit = 1.0
+                                ev.append('wall')
+                            if self.drifting:
+                                self.drifting = False
+                                self.drift_charge = 0.0
+                                self.drift_tier = 0
+
         # 트랙 질의 + 벽
         t.query(self.x, self.z, self.hint, q)
         self.hint = q.idx
@@ -2172,6 +2327,19 @@ class KartSim(object):
                 elif di < -N / 2:
                     di += N
                 if abs(di * t.ds) < p['half_len'] and abs(q.d - p['d']) < p['half_w']:
+                    pk = p.get('kind')
+                    if pk == 'jump':
+                        if self.hop_t <= 0 and self.air_t <= 0:
+                            self.hop_t = self.hop_dur = 0.95
+                            ev.append('jump')
+                        self.pad_cool = 0.7
+                        break
+                    if pk == 'oil':
+                        if self.star_t <= 0 and self.auto_t <= 0:
+                            self.slide_t = max(self.slide_t, 1.4)
+                            ev.append('oil')
+                        self.pad_cool = 0.9
+                        break
                     self.boost_t = max(self.boost_t, 1.5)
                     ev.append('pad')
                     f = math.hypot(self.vx, self.vz)
@@ -2212,6 +2380,40 @@ class KartSim(object):
 
 
 class BotBrain(object):
+    def _avoid(self, tr, idx, lane):
+        """앞쪽 장애물들이 막은 가로 구간을 모아서, 지금 차선에서 가장 가까운 빈 틈으로 비켜 간다 (길이 다 막혔으면 갓길로)"""
+        N = tr.N
+        hw = tr.hw
+        lim = tr.wall_off - 2.0
+        blocked = []
+        seen = set()
+        for k in (2, 5, 8, 11, 14, 17):
+            lst = tr.obs_near.get((idx + k) % N)
+            if not lst:
+                continue
+            for ob in lst:
+                if id(ob) in seen:
+                    continue
+                seen.add(id(ob))
+                ahead = (ob[3] - idx) % N
+                if ahead < 1 or ahead > 18:
+                    continue
+                m = ob[2] + 1.8
+                blocked.append((ob[4] - m, ob[4] + m))
+        if not blocked:
+            return lane
+        if all(not (a < lane < b) for a, b in blocked):
+            return lane
+        best = None
+        best_s = 1e9
+        for a, b in blocked:
+            for c in (a - 0.05, b + 0.05):
+                if -lim <= c <= lim and all(not (a2 < c < b2) for a2, b2 in blocked):
+                    sc = abs(c - lane) + (4.0 if abs(c) > hw - 0.8 else 0.0)
+                    if sc < best_s:
+                        best_s, best = sc, c
+        return lane if best is None else best
+
     def __init__(self, rand):
         self.skill = 0.82 + rand() * 0.2
         self.lane = (rand() - 0.5) * 0.7
@@ -2227,6 +2429,8 @@ class BotBrain(object):
         self.t += dt
         look = int(clamp(round((kart.speed * 0.5 + 12) / tr.ds), 5, 34))
         lane = (self.lane + math.sin(self.t * 0.35 + self.phase) * 0.12) * tr.width * 0.5
+        if tr.obs_near:
+            lane = self._avoid(tr, q.idx, lane)
         i = (q.idx + look) % N
         tx = tr.px[i] + tr.rx[i] * lane
         tz = tr.pz[i] + tr.rz[i] * lane
@@ -2359,15 +2563,16 @@ class Racer(object):
 
 class Race(object):
     def __init__(self, map_id, laps, entries, multi=False, is_host=True, countdown=5.0, net=None, auto_local=False, items=False):
-        self.map_id = map_id
+        self.map_id = map_id              # 기본 맵 번호 또는 만든 맵 데이터(dict)
         self.track = Track(map_id)
+        self.custom = self.track.custom
         self.laps = laps
         self.multi = multi
         self.is_host = is_host
         self.net = net
         self.racers = []
         self.local = None
-        rnd = Rng(map_id * 31 + 7)
+        rnd = Rng(map_id * 31 + 7) if self.custom is None else Rng((self.track.info['seed'] ^ 0x5151) & 0xFFFFFFFF)
         for e in entries:
             rc = Racer(e['id'], e['name'], e['kart'], e['slot'], e['kind'])
             if rc.kind != 'remote':
@@ -2652,6 +2857,7 @@ class RoomServer(object):
         self.lock = threading.RLock()
         self.host_id = None
         self.map = 1
+        self.cmap = None              # 방장이 고른 '만든 맵' 데이터 (있으면 이 맵으로 달림)
         self.laps = 3
         self.bots = 0
         self.items = True             # 아이템전 여부
@@ -2707,6 +2913,8 @@ class RoomServer(object):
                 with self.lock:
                     info = {'game': 'kart3d', 'name': self.name, 'port': self.port, 'map': self.map,
                             'players': len(self.conns), 'state': self.state}
+                    if self.cmap:
+                        info['cname'] = str(self.cmap.get('name', ''))[:20]
                 try:
                     self.udp.sendto(json.dumps(info).encode('utf-8'), addr)
                 except Exception:
@@ -2759,7 +2967,7 @@ class RoomServer(object):
     def _room_msg(self):
         with self.lock:
             return {'t': 'room', 'host': self.host_id, 'map': self.map, 'laps': self.laps, 'bots': self.bots, 'items': self.items, 'state': self.state,
-                    'players': [{'id': c.id, 'name': c.name, 'kart': c.kart} for c in self.conns.values()]}
+                    'cmap': self.cmap, 'players': [{'id': c.id, 'name': c.name, 'kart': c.kart} for c in self.conns.values()]}
 
     def _broadcast(self, obj, exclude=None):
         data = (json.dumps(obj, separators=(',', ':')) + '\n').encode('utf-8')
@@ -2817,6 +3025,10 @@ class RoomServer(object):
             if self.host_id == c.id and self.state == 'lobby':
                 if 'map' in m:
                     self.map = int(clamp(int(m['map']), 1, MAP_COUNT))
+                    if 'cmap' not in m:
+                        self.cmap = None             # 기본 맵을 고르면 '만든 맵' 해제
+                if 'cmap' in m:
+                    self.cmap = cmap_clean(m['cmap']) if m['cmap'] else None
                 if 'laps' in m:
                     self.laps = int(clamp(int(m['laps']), 1, 10))
                 if 'bots' in m:
@@ -2836,7 +3048,8 @@ class RoomServer(object):
                     bots = []
                     for i in range(min(self.bots, self.MAX_PLAYERS - len(order))):
                         bots.append({'id': 'b%d' % (i + 1), 'name': 'BOT %d' % (i + 1), 'kart': random.randrange(KART_COUNT), 'slot': len(order) + i})
-                    msg = {'t': 'start', 'map': self.map, 'laps': self.laps, 'countdown': 5.0, 'players': order, 'bots': bots, 'items': self.items}
+                    msg = {'t': 'start', 'map': self.map, 'laps': self.laps, 'countdown': 5.0, 'players': order, 'bots': bots, 'items': self.items,
+                           'cmap': self.cmap}
                 self._broadcast(msg)
         elif t == 'lobby':
             if self.host_id == c.id:
@@ -3006,7 +3219,7 @@ class Session(object):
         self.my_id = None
         self.host_id = None
         self.players = []
-        self.settings = {'map': 1, 'laps': 3, 'bots': 0, 'items': True}
+        self.settings = {'map': 1, 'laps': 3, 'bots': 0, 'items': True, 'cmap': None}
         self.start_msg = None
         self.address = ''
         self._joined = False
@@ -3015,11 +3228,12 @@ class Session(object):
     def is_host(self):
         return self.my_id is not None and self.my_id == self.host_id
 
-    def host_game(self, port=DEFAULT_PORT):
+    def host_game(self, port=DEFAULT_PORT, cmap=None):
         self.leave()
         try:
             self.server = RoomServer(port, name=self.profile.display_name()).start()
             self.server.map = int(self.profile['map'])
+            self.server.cmap = cmap_clean(cmap) if cmap else None
             self.server.laps = int(self.profile['laps'])
             self.server.items = self.profile['mode'] == 'item'
         except Exception as e:
@@ -3062,10 +3276,14 @@ class Session(object):
             elif t == 'room':
                 self.host_id = m.get('host')
                 self.players = m.get('players', [])
-                self.settings = {'map': m.get('map', 1), 'laps': m.get('laps', 3), 'bots': m.get('bots', 0), 'items': bool(m.get('items', False))}
+                cm = m.get('cmap')
+                self.settings = {'map': m.get('map', 1), 'laps': m.get('laps', 3), 'bots': m.get('bots', 0), 'items': bool(m.get('items', False)),
+                                 'cmap': cmap_clean(cm) if cm else None}
                 if self.state in ('connecting', 'idle'):
                     self.state = 'lobby'
             elif t == 'start':
+                cm = m.get('cmap')
+                m['cmap'] = cmap_clean(cm) if cm else None
                 self.start_msg = m
                 self.state = 'racing'
             elif t == 'tolobby':
@@ -3145,7 +3363,9 @@ def serve_forever(port=DEFAULT_PORT):
 class Profile(dict):
     DEFAULTS = {'name': '', 'kart': None, 'map': 1, 'laps': 3, 'bots': 7, 'quality': 1, 'auto_gas': True, 'sound': True,
                 'lang': 'auto', 'last_ip': '', 'port': DEFAULT_PORT, 'steer_mode': 'buttons', 'steer_resp': 1,
-                'mode': 'item'}           # 'item' = 아이템전, 'speed' = 스피드전
+                'mode': 'item',           # 'item' = 아이템전, 'speed' = 스피드전
+                'map_src': 'builtin',     # 'builtin' = 기본 맵(1~1000), 'custom' = 내가 만든 맵
+                'cmap': ''}               # 고른 '내 맵' 의 uid
 
     def __init__(self, filename='kart3d_profile.json'):
         dict.__init__(self)
@@ -3810,6 +4030,13 @@ class ItemSystem(object):
         N = tr.N
         rows = int(clamp(tr.length / 420.0, 4, 8))
         r = Rng(tr.info['seed'] ^ 0x1717)
+        if tr.box_rows is not None:              # 맵 만들기에서 직접 놓은 상자 줄
+            for idx in tr.box_rows:
+                for j in range(4):
+                    d = tr.hw * (-0.66 + 0.44 * j)
+                    x, y, z, h = tr.pose_at(idx, d)
+                    self.boxes.append({'x': x, 'y': y + 1.15, 'z': z, 'idx': idx, 't': 0.0, 'ph': r() * TAU, 'h': h})
+            return
         pads = [p['idx'] for p in tr.pads]
         for k in range(rows):
             idx = int(((k + 0.35 + r() * 0.3) / rows) * N)
@@ -4685,6 +4912,619 @@ def wall_boxes(it):
             (0, 0.8, 0.21, 0.25, 0.38, 0.01, c2, 1, 1, False), (1.05, 0.8, 0.21, 0.25, 0.38, 0.01, c2, 1, 1, False)]
 
 
+# ----------------------------------------------------------------------------
+#  맵 만들기 : 직접 그린 길 + 장애물/나무/화산 기둥 배치 + 세부 설정  ->  솔로/아이템전/멀티에서 달리기
+#  (폰/PC 공통 데이터 형식. 멀티에서는 방장이 맵 데이터를 그대로 보내서 모두 같은 트랙을 만든다)
+# ----------------------------------------------------------------------------
+CMAP_VER = 1
+CMAP_WORLD = 1000.0          # 편집 가능한 땅: x, z 가 -1000 ~ +1000 m
+CMAP_MAX_PTS = 400
+CMAP_MAX_OBJS = 900
+CMAP_MIN_LEN = 260.0         # 이보다 짧은 길은 만들 수 없음 (m)
+
+# 놓을 수 있는 물건: (종류, 한글, 영문, 분류, 충돌 반지름(m, 크기 1), 기본 크기, 줄로 놓을 때 간격(m, 크기 1), 편집기 색)
+#   분류: 'obs' 장애물 / 'deco' 장식(나무 등, 길 위에 놓으면 장애물이 됨) / 'road' 도로 기능(발판/상자)
+OBJ_ROWS = [
+    ('cone', '라바콘', 'Cone', 'obs', 0.42, 1.0, 2.4, (255, 128, 30)),
+    ('drum', '드럼통', 'Oil drum', 'obs', 0.62, 1.0, 1.7, (40, 130, 230)),
+    ('crate', '나무 상자', 'Crate', 'obs', 0.9, 1.0, 2.0, (196, 146, 82)),
+    ('tires', '타이어 더미', 'Tire stack', 'obs', 0.95, 1.0, 2.0, (60, 60, 68)),
+    ('block', '방호벽', 'Barrier', 'obs', 1.05, 1.0, 2.2, (228, 228, 232)),
+    ('rock', '바위', 'Boulder', 'obs', 3.0, 0.6, 7.0, (138, 138, 148)),
+    ('lavapillar', '화산 기둥', 'Lava pillar', 'obs', 1.35, 1.0, 4.5, (255, 92, 24)),
+    ('pillar', '돌기둥', 'Stone pillar', 'obs', 1.15, 1.0, 4.0, (226, 220, 204)),
+    ('icespike', '얼음 가시', 'Ice spike', 'obs', 1.3, 1.0, 4.0, (168, 222, 255)),
+    ('crystal', '크리스탈', 'Crystal', 'obs', 1.2, 1.0, 4.0, (255, 60, 220)),
+    ('pine', '소나무', 'Pine', 'deco', 0.75, 1.0, 7.5, (36, 118, 58)),
+    ('roundtree', '둥근 나무', 'Round tree', 'deco', 0.8, 1.0, 8.0, (74, 164, 70)),
+    ('palm', '야자수', 'Palm', 'deco', 0.6, 1.0, 9.0, (80, 190, 90)),
+    ('acacia', '아카시아', 'Acacia', 'deco', 0.7, 1.0, 9.0, (120, 150, 50)),
+    ('deadtree', '고목', 'Dead tree', 'deco', 0.6, 1.0, 6.0, (110, 80, 60)),
+    ('bamboo', '대나무', 'Bamboo', 'deco', 0.9, 1.0, 3.2, (110, 190, 80)),
+    ('cactus', '선인장', 'Cactus', 'deco', 0.9, 1.0, 5.0, (60, 140, 76)),
+    ('bush', '덤불', 'Bush', 'deco', 1.4, 1.0, 3.2, (70, 140, 60)),
+    ('flowers', '꽃밭', 'Flowers', 'deco', 0.0, 1.0, 4.0, (255, 120, 160)),
+    ('mushroom', '버섯', 'Mushroom', 'deco', 2.0, 1.0, 6.0, (220, 60, 60)),
+    ('sunflower', '해바라기', 'Sunflower', 'deco', 0.5, 1.0, 3.0, (255, 210, 40)),
+    ('lollipop', '막대사탕', 'Lollipop', 'deco', 0.5, 1.0, 4.4, (255, 110, 190)),
+    ('volcano', '화산', 'Volcano', 'deco', 13.0, 1.0, 36.0, (190, 60, 24)),
+    ('building', '빌딩', 'Building', 'deco', 8.0, 1.0, 26.0, (90, 100, 150)),
+    ('windmill', '풍차', 'Windmill', 'deco', 1.6, 1.0, 10.0, (240, 236, 220)),
+    ('pyramid', '피라미드', 'Pyramid', 'deco', 6.0, 1.0, 15.0, (226, 196, 120)),
+    ('lantern', '등불', 'Lantern', 'deco', 0.3, 1.0, 5.0, (255, 210, 120)),
+    ('tombstone', '비석', 'Tombstone', 'deco', 0.6, 1.0, 2.2, (150, 150, 160)),
+    ('pad', '부스트 발판', 'Boost pad', 'road', 0.0, 1.0, 12.0, (25, 230, 255)),
+    ('jump', '점프대', 'Jump pad', 'road', 0.0, 1.0, 12.0, (255, 225, 60)),
+    ('oil', '기름 웅덩이', 'Oil slick', 'road', 0.0, 1.0, 9.0, (40, 30, 60)),
+    ('box', '아이템 상자', 'Item boxes', 'road', 0.0, 1.0, 30.0, (255, 170, 40)),
+]
+OBJ_INFO = {r[0]: dict(kind=r[0], ko=r[1], en=r[2], cat=r[3], rad=r[4], s=r[5], gap=r[6], col=r[7]) for r in OBJ_ROWS}
+OBJ_ORDER = [r[0] for r in OBJ_ROWS]
+OBJ_BY_CAT = {c: [r[0] for r in OBJ_ROWS if r[3] == c] for c in ('obs', 'deco', 'road')}
+CMAP_WEATHERS = ['auto', 'none', 'rain', 'snow', 'leaf', 'petal', 'ember', 'ash', 'firefly', 'sparkle', 'bubble', 'dust', 'spore', 'sprinkle']
+CMAP_WEATHER_KO = {'auto': '자동(바이옴)', 'none': '맑음', 'rain': '비', 'snow': '눈', 'leaf': '낙엽', 'petal': '꽃잎', 'ember': '불씨', 'ash': '화산재',
+                   'firefly': '반딧불', 'sparkle': '반짝이', 'bubble': '거품', 'dust': '모래 먼지', 'spore': '포자', 'sprinkle': '스프링클'}
+CMAP_WEATHER_EN = {'auto': 'Auto', 'none': 'Clear', 'rain': 'Rain', 'snow': 'Snow', 'leaf': 'Leaves', 'petal': 'Petals', 'ember': 'Embers', 'ash': 'Ash',
+                   'firefly': 'Fireflies', 'sparkle': 'Sparkles', 'bubble': 'Bubbles', 'dust': 'Dust', 'spore': 'Spores', 'sprinkle': 'Sprinkles'}
+CMAP_DECO_KO = ['없음', '조금', '보통', '많이']
+CMAP_DECO_EN = ['None', 'Few', 'Normal', 'Lots']
+CMAP_DECO_K = [0.0, 0.45, 1.0, 1.7]
+
+
+def obj_name(kind, lang='ko'):
+    o = OBJ_INFO.get(kind)
+    if o is None:
+        return kind
+    return o['ko'] if lang == 'ko' else o['en']
+
+
+def _fnv(text):
+    h = 0x811c9dc5
+    for ch in text.encode('utf-8'):
+        h = ((h ^ ch) * 0x01000193) & 0xFFFFFFFF
+    return h
+
+
+def _num(v, lo, hi, nd=1, default=0.0):
+    try:
+        f = float(v)
+    except Exception:
+        return default
+    if f != f or f in (float('inf'), float('-inf')):
+        return default
+    f = lo if f < lo else (hi if f > hi else f)
+    return round(f, nd)
+
+
+def _clean_name(v, default):
+    t = ''.join(ch for ch in str(v if v is not None else '') if ch >= ' ' and ch not in '\x7f').strip()
+    return t[:20] if t else default
+
+
+def cmap_clean(d):
+    """불러온/받은 맵 데이터를 안전한 형태로 고친다 (이상한 값은 범위 안으로, 모르는 물건은 버림). 못 쓰면 None"""
+    if not isinstance(d, dict):
+        return None
+    try:
+        W = CMAP_WORLD
+        pts = []
+        for p in list(d.get('pts') or [])[:CMAP_MAX_PTS]:
+            if not isinstance(p, (list, tuple)) or len(p) < 2:
+                continue
+            pts.append([_num(p[0], -W, W), _num(p[1], -W, W), _num(p[2] if len(p) > 2 else 0.0, -40.0, 80.0)])
+        if len(pts) < 4:
+            return None
+        objs = []
+        for o in list(d.get('objs') or [])[:CMAP_MAX_OBJS]:
+            if not isinstance(o, (list, tuple)) or len(o) < 3:
+                continue
+            k = str(o[0])
+            if k not in OBJ_INFO:
+                continue
+            objs.append([k, _num(o[1], -W, W), _num(o[2], -W, W), _num(o[3] if len(o) > 3 else 1.0, 0.3, 3.0, 2, 1.0),
+                         _num(o[4] if len(o) > 4 else 0.0, -7.0, 7.0, 2)])
+        uid = ''.join(ch for ch in str(d.get('uid') or '') if ch.isalnum())[:16]
+        weather = str(d.get('weather') or 'auto')
+        if weather not in CMAP_WEATHERS:
+            weather = 'auto'
+        return dict(v=CMAP_VER, uid=uid, name=_clean_name(d.get('name'), 'My map'), pts=pts, objs=objs,
+                    look=int(_num(d.get('look', 1), 1, MAP_COUNT, 0, 1)), width=_num(d.get('width', 16), 10.0, 30.0, 1, 16.0),
+                    hills=_num(d.get('hills', 0.0), 0.0, 1.0, 2), deco=int(_num(d.get('deco', 2), 0, 3, 0, 2)),
+                    pads=1 if d.get('pads', 1) else 0, weather=weather, laps=int(_num(d.get('laps', 3), 1, 10, 0, 3)))
+    except Exception:
+        return None
+
+
+def cmap_key(d):
+    """맵 내용(이름/uid 제외)으로 만든 고정 숫자 - 자동 장식 배치 등의 씨앗. 어느 기기에서든 같은 값"""
+    body = dict(d)
+    body.pop('uid', None)
+    body.pop('name', None)
+    return _fnv(json.dumps(body, sort_keys=True, separators=(',', ':')))
+
+
+def map_title(ref, lang='ko'):
+    """기본 맵 번호 / 만든 맵 데이터 -> 화면 표시용 짧은 이름"""
+    if isinstance(ref, dict):
+        return u'★ ' + str(ref.get('name', '?'))
+    i = map_info(ref)
+    return '#%d %s' % (i['id'], i['name'] if lang == 'ko' else i['name_en'])
+
+
+def cmap_theme(d):
+    """맵 데이터의 바이옴(색/하늘/장식물 팔레트) + 날씨 설정 반영"""
+    th = biome(d['look'])
+    w = d.get('weather', 'auto')
+    if w == 'auto':
+        return th
+    th = dict(th)
+    if w == 'none':
+        th['weather'] = None
+        th['wcol'] = None
+        return th
+    th['weather'] = w
+    base_c = WEATHER[w][0]
+    if base_c is not None:
+        th['wcol'] = base_c
+    elif w == 'leaf':
+        th['wcol'] = th['leaf'][0]
+    elif w == 'petal':
+        th['wcol'] = mix_rgb(th['flower'][0], (255, 255, 255), 0.25)
+    elif w == 'sparkle':
+        th['wcol'] = mix_rgb(th['crystal'], (255, 255, 255), 0.5)
+    elif w == 'dust':
+        th['wcol'] = mix_rgb(hex_rgb(th['ground'][0]), (255, 255, 255), 0.35)
+    else:
+        th['wcol'] = (255, 255, 255)
+    return th
+
+
+def cmap_new(name='My map', look=1):
+    """새 맵: 바로 달릴 수 있는 기본 타원 코스"""
+    pts = []
+    K = 16
+    for i in range(K):
+        a = TAU * i / K
+        pts.append([round(math.cos(a) * 300.0, 1), round(math.sin(a) * 190.0, 1), 0.0])
+    return dict(v=CMAP_VER, uid='', name=name, pts=pts, objs=[], look=int(look), width=16.0, hills=0.0, deco=2, pads=1,
+                weather='auto', laps=3)
+
+
+def cmap_from_builtin(mid, name=None):
+    """기본 맵 #mid 의 코스 모양을 가져와서 편집할 수 있는 맵으로 (조절점 약 30m 간격)"""
+    tr = Track(mid, True)
+    step = max(1, int(round(30.0 / tr.ds)))
+    pts = []
+    for i in range(0, tr.N, step):
+        pts.append([round(tr.px[i], 1), round(tr.pz[i], 1), round(tr.py[i], 1)])
+    # 가운데로 옮기기
+    cx = (tr.bounds[0] + tr.bounds[1]) / 2.0
+    cz = (tr.bounds[2] + tr.bounds[3]) / 2.0
+    for p in pts:
+        p[0] = round(clamp(p[0] - cx, -CMAP_WORLD, CMAP_WORLD), 1)
+        p[1] = round(clamp(p[1] - cz, -CMAP_WORLD, CMAP_WORLD), 1)
+    i = map_info(mid)
+    d = cmap_new(name or i['name'], mid)
+    d['pts'] = pts
+    d['width'] = float(tr.width)
+    return d
+
+
+def stroke_to_pts(stroke, spacing=26.0):
+    """손가락/마우스로 그린 선 -> 닫힌 코스 조절점 (일정 간격으로 다시 찍고 살짝 다듬음). 너무 짧으면 None"""
+    pts = []
+    for p in stroke:
+        x, z = float(p[0]), float(p[1])
+        if not pts or (x - pts[-1][0]) ** 2 + (z - pts[-1][1]) ** 2 > 0.25:
+            pts.append((x, z))
+    if len(pts) < 3:
+        return None
+    seg = []
+    total = 0.0
+    for i in range(len(pts) - 1):
+        d = math.hypot(pts[i + 1][0] - pts[i][0], pts[i + 1][1] - pts[i][1])
+        seg.append(d)
+        total += d
+    close = math.hypot(pts[0][0] - pts[-1][0], pts[0][1] - pts[-1][1])
+    if total + close < CMAP_MIN_LEN:
+        return None
+    n = max(5, int(round(total / spacing)))
+    out = []
+    i = 0
+    acc = 0.0
+    for k in range(n):
+        tgt = total * k / n
+        while i < len(seg) - 1 and tgt > acc + seg[i]:
+            acc += seg[i]
+            i += 1
+        f = (tgt - acc) / seg[i] if seg[i] > 1e-9 else 0.0
+        f = 0.0 if f < 0 else (1.0 if f > 1 else f)
+        a, b = pts[i], pts[i + 1]
+        out.append((a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
+    # 끝과 처음 사이가 멀면 중간 점을 채워서 부드럽게 닫기
+    if close > spacing * 1.5:
+        m = int(close // spacing)
+        a, b = out[-1], out[0]
+        for k in range(1, m):
+            f = k / float(m)
+            out.append((a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f))
+    # 손떨림 다듬기 (이웃 평균 한 번)
+    nn = len(out)
+    sm = []
+    for k in range(nn):
+        a, b, c = out[k - 1], out[k], out[(k + 1) % nn]
+        sm.append([round(clamp(0.25 * a[0] + 0.5 * b[0] + 0.25 * c[0], -CMAP_WORLD, CMAP_WORLD), 1),
+                   round(clamp(0.25 * a[1] + 0.5 * b[1] + 0.25 * c[1], -CMAP_WORLD, CMAP_WORLD), 1), 0.0])
+    return sm
+
+
+def stroke_points_every(stroke, gap):
+    """그린 선을 따라 gap(m) 간격으로 물건 놓을 자리 [(x, z, 방향)]"""
+    out = []
+    if not stroke:
+        return out
+    px, pz = float(stroke[0][0]), float(stroke[0][1])
+    out.append((px, pz, 0.0))
+    acc = 0.0
+    for p in stroke[1:]:
+        x, z = float(p[0]), float(p[1])
+        d = math.hypot(x - px, z - pz)
+        if d < 1e-6:
+            continue
+        ang = math.atan2(x - px, z - pz)
+        t = gap - acc
+        while t <= d:
+            out.append((px + (x - px) * t / d, pz + (z - pz) * t / d, ang))
+            t += gap
+        acc = d - (t - gap)
+        px, pz = x, z
+    if len(out) > 1:
+        out[0] = (out[0][0], out[0][1], out[1][2])
+    return out
+
+
+class MapStore(object):
+    """만든 맵 목록 (kart3d_maps.json, 게임 파일 옆 또는 홈 폴더)"""
+    FILE = 'kart3d_maps.json'
+
+    def __init__(self, filename=None):
+        self.filename = filename or self.FILE
+        self.path = None
+        self.maps = []
+        self.load()
+
+    def _candidates(self):
+        out = []
+        try:
+            out.append(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0] if sys.argv and sys.argv[0] else __file__)), self.filename))
+        except Exception:
+            pass
+        try:
+            out.append(os.path.join(os.path.expanduser('~'), self.filename))
+        except Exception:
+            pass
+        out.append(self.filename)
+        return out
+
+    def load(self):
+        for p in self._candidates():
+            try:
+                if os.path.isfile(p):
+                    with open(p, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    lst = data.get('maps', []) if isinstance(data, dict) else data
+                    maps = []
+                    for d in lst if isinstance(lst, list) else []:
+                        c = cmap_clean(d)
+                        if c is not None:
+                            if not c['uid'] or any(m['uid'] == c['uid'] for m in maps):
+                                c['uid'] = self.new_uid(maps)
+                            maps.append(c)
+                    self.maps = maps
+                    self.path = p
+                    return
+            except Exception:
+                continue
+
+    def save(self):
+        paths = [self.path] if self.path else []
+        paths += [p for p in self._candidates() if p not in paths]
+        for p in paths:
+            try:
+                tmp = p + '.tmp'
+                with open(tmp, 'w', encoding='utf-8') as f:
+                    json.dump({'v': CMAP_VER, 'maps': self.maps}, f, ensure_ascii=False, separators=(',', ':'))
+                try:
+                    os.replace(tmp, p)
+                except Exception:
+                    with open(p, 'w', encoding='utf-8') as f:
+                        json.dump({'v': CMAP_VER, 'maps': self.maps}, f, ensure_ascii=False, separators=(',', ':'))
+                self.path = p
+                return True
+            except Exception:
+                continue
+        return False
+
+    def new_uid(self, maps=None):
+        maps = self.maps if maps is None else maps
+        used = set(m['uid'] for m in maps)
+        n = int(time.time() * 1000) & 0xFFFFFFFF
+        while True:
+            u = 'm%08x' % (hash32(n) & 0xFFFFFFFF)
+            if u not in used:
+                return u
+            n += 1
+
+    def get(self, uid):
+        for m in self.maps:
+            if m['uid'] == uid:
+                return m
+        return None
+
+    def index(self, uid):
+        for i, m in enumerate(self.maps):
+            if m['uid'] == uid:
+                return i
+        return -1
+
+    def put(self, d):
+        """저장 (uid 가 같으면 덮어쓰기). 반환: uid"""
+        c = cmap_clean(d)
+        if c is None:
+            return None
+        if not c['uid']:
+            c['uid'] = self.new_uid()
+        i = self.index(c['uid'])
+        if i >= 0:
+            self.maps[i] = c
+        else:
+            self.maps.append(c)
+        self.save()
+        return c['uid']
+
+    def add_copy(self, d):
+        """다른 사람 맵 저장: 같은 내용이 이미 있으면 그것을, 아니면 새 uid 로"""
+        c = cmap_clean(d)
+        if c is None:
+            return None
+        k = cmap_key(c)
+        for m in self.maps:
+            if cmap_key(m) == k:
+                return m['uid']
+        c['uid'] = self.new_uid()
+        self.maps.append(c)
+        self.save()
+        return c['uid']
+
+    def delete(self, uid):
+        i = self.index(uid)
+        if i >= 0:
+            del self.maps[i]
+            self.save()
+
+
+class MapEdit(object):
+    """편집 중인 맵 (도구 동작 + 되돌리기 + 미리보기 트랙). 폰/PC 편집기 화면이 같이 쓴다."""
+    HIT = 14.0          # 점/물건을 집는 반경 (m) - 화면 배율에 맞춰 UI 가 바꿔 준다
+
+    def __init__(self, data):
+        self.data = cmap_clean(data) or cmap_new()
+        self.undo_stack = []
+        self.dirty = False            # 저장 안 한 변경
+        self._prev = None
+        self._prev_key = None
+        self.msg = ''
+
+    # ---- 되돌리기 ------------------------------------------------------------------
+    def snapshot(self):
+        self.undo_stack.append(json.dumps(self.data, separators=(',', ':')))
+        if len(self.undo_stack) > 60:
+            del self.undo_stack[0]
+        self.dirty = True
+
+    def undo(self):
+        if not self.undo_stack:
+            return False
+        self.data = json.loads(self.undo_stack.pop())
+        self.dirty = True
+        return True
+
+    # ---- 미리보기 트랙 (중심선만) --------------------------------------------------------
+    def preview(self):
+        key = json.dumps([self.data['pts'], self.data['width'], self.data['hills']], separators=(',', ':'))
+        if key != self._prev_key:
+            self._prev_key = key
+            try:
+                self._prev = Track(self.data, True)
+            except Exception:
+                self._prev = None
+        return self._prev
+
+    def warnings(self, lang='ko'):
+        out = []
+        tr = self.preview()
+        if tr is None:
+            return [T_(lang, '길을 만들 수 없어요. 다시 그려 보세요', 'Cannot build this road. Try drawing again')]
+        if tr.length < CMAP_MIN_LEN:
+            out.append(T_(lang, '길이 너무 짧아요', 'Road is too short'))
+        sep = min_separation([(tr.px[i], tr.py[i], tr.pz[i]) for i in range(tr.N)], tr.ds)
+        if sep < 2 * (tr.hw + tr.SH) + 4.0:
+            out.append(T_(lang, '길이 서로 겹치거나 너무 가까워요', 'Parts of the road overlap or are too close'))
+        return out
+
+    # ---- 길 -----------------------------------------------------------------------
+    def set_stroke(self, stroke):
+        pts = stroke_to_pts(stroke)
+        if pts is None:
+            self.msg = 'short'
+            return False
+        self.snapshot()
+        self.data['pts'] = pts
+        return True
+
+    def nearest_point(self, x, z, rad=None):
+        rad = self.HIT if rad is None else rad
+        best, bd = -1, rad * rad
+        for i, p in enumerate(self.data['pts']):
+            d = (p[0] - x) ** 2 + (p[1] - z) ** 2
+            if d < bd:
+                bd, best = d, i
+        return best
+
+    def move_point(self, i, x, z, snap=True):
+        if snap:
+            self.snapshot()
+        p = self.data['pts'][i]
+        p[0] = round(clamp(x, -CMAP_WORLD, CMAP_WORLD), 1)
+        p[1] = round(clamp(z, -CMAP_WORLD, CMAP_WORLD), 1)
+        self.dirty = True
+
+    def insert_point(self, x, z):
+        """가장 가까운 구간 사이에 조절점 추가"""
+        pts = self.data['pts']
+        if len(pts) >= CMAP_MAX_PTS:
+            return -1
+        n = len(pts)
+        best, bd = 0, 1e30
+        for i in range(n):
+            a, b = pts[i], pts[(i + 1) % n]
+            ex, ez = b[0] - a[0], b[1] - a[1]
+            L = ex * ex + ez * ez
+            t = clamp(((x - a[0]) * ex + (z - a[1]) * ez) / L, 0.0, 1.0) if L > 1e-9 else 0.0
+            d = (a[0] + ex * t - x) ** 2 + (a[1] + ez * t - z) ** 2
+            if d < bd:
+                bd, best = d, i
+        self.snapshot()
+        a, b = pts[best], pts[(best + 1) % n]
+        h = round((a[2] + b[2]) / 2.0, 1)
+        pts.insert(best + 1, [round(clamp(x, -CMAP_WORLD, CMAP_WORLD), 1), round(clamp(z, -CMAP_WORLD, CMAP_WORLD), 1), h])
+        return best + 1
+
+    def delete_point(self, i):
+        if len(self.data['pts']) <= 4:
+            self.msg = 'min'
+            return False
+        self.snapshot()
+        del self.data['pts'][i]
+        return True
+
+    def raise_point(self, i, dh):
+        self.snapshot()
+        p = self.data['pts'][i]
+        p[2] = round(clamp(p[2] + dh, -40.0, 80.0), 1)
+
+    def set_start(self, i):
+        pts = self.data['pts']
+        if 0 < i < len(pts):
+            self.snapshot()
+            self.data['pts'] = pts[i:] + pts[:i]
+
+    def reverse(self):
+        self.snapshot()
+        pts = self.data['pts']
+        self.data['pts'] = [pts[0]] + pts[1:][::-1]
+
+    def move_all(self, dx, dz):
+        self.snapshot()
+        W = CMAP_WORLD
+        for p in self.data['pts']:
+            p[0] = round(clamp(p[0] + dx, -W, W), 1)
+            p[1] = round(clamp(p[1] + dz, -W, W), 1)
+        for o in self.data['objs']:
+            o[1] = round(clamp(o[1] + dx, -W, W), 1)
+            o[2] = round(clamp(o[2] + dz, -W, W), 1)
+
+    # ---- 물건 ----------------------------------------------------------------------
+    def road_angle(self, x, z):
+        """그 자리에서 길이 향하는 방향 (발판/방호벽을 길 방향으로 놓을 때)"""
+        tr = self.preview()
+        if tr is None:
+            return 0.0
+        q = Q()
+        tr.query(x, z, -1, q)
+        return math.atan2(q.tx, q.tz)
+
+    def add_obj(self, kind, x, z, s=None, rot=None, snap=True):
+        if kind not in OBJ_INFO or len(self.data['objs']) >= CMAP_MAX_OBJS:
+            self.msg = 'full'
+            return False
+        if snap:
+            self.snapshot()
+        info = OBJ_INFO[kind]
+        if s is None:
+            s = info['s']
+        if rot is None:
+            rot = self.road_angle(x, z) if kind in ('block', 'pad', 'jump', 'oil', 'box', 'crate', 'tires') else (hash32(int(x * 7 + z * 13)) % 628) / 100.0
+        W = CMAP_WORLD
+        self.data['objs'].append([kind, round(clamp(x, -W, W), 1), round(clamp(z, -W, W), 1), round(clamp(s, 0.3, 3.0), 2), round(wrap_pi(rot), 2)])
+        return True
+
+    def add_line(self, kind, stroke, s=None):
+        """그린 선을 따라 물건을 줄지어 놓기 (콘/방호벽 줄, 가로수 등)"""
+        info = OBJ_INFO.get(kind)
+        if info is None or len(stroke) < 2:
+            return 0
+        s = info['s'] if s is None else s
+        spots = stroke_points_every(stroke, max(1.0, info['gap'] * s))
+        if not spots:
+            return 0
+        self.snapshot()
+        n = 0
+        for (x, z, ang) in spots:
+            if len(self.data['objs']) >= CMAP_MAX_OBJS:
+                self.msg = 'full'
+                break
+            rot = ang if kind in ('block', 'crate', 'tires', 'drum') else None
+            if kind in ('pad', 'jump', 'oil', 'box'):
+                rot = None
+            self.add_obj(kind, x, z, s, rot, snap=False)
+            n += 1
+        return n
+
+    def erase_at(self, x, z, rad=None):
+        rad = self.HIT if rad is None else rad
+        objs = self.data['objs']
+        hit = [i for i, o in enumerate(objs) if (o[1] - x) ** 2 + (o[2] - z) ** 2 < (rad + OBJ_INFO[o[0]]['rad'] * o[3] * 0.5) ** 2]
+        if not hit:
+            return 0
+        self.snapshot()
+        for i in reversed(hit):
+            del objs[i]
+        return len(hit)
+
+    def scale_obj_at(self, x, z, k):
+        objs = self.data['objs']
+        best, bd = -1, (self.HIT * 1.5) ** 2
+        for i, o in enumerate(objs):
+            d = (o[1] - x) ** 2 + (o[2] - z) ** 2
+            if d < bd:
+                bd, best = d, i
+        if best < 0:
+            return False
+        self.snapshot()
+        objs[best][3] = round(clamp(objs[best][3] * k, 0.3, 3.0), 2)
+        return True
+
+    def clear_objs(self):
+        if self.data['objs']:
+            self.snapshot()
+            self.data['objs'] = []
+
+    # ---- 설정 ----------------------------------------------------------------------
+    def set(self, key, value):
+        if self.data.get(key) != value:
+            self.snapshot()
+            self.data[key] = value
+            self.data = cmap_clean(self.data) or self.data
+
+    def result(self):
+        return cmap_clean(self.data)
+
+
+def T_(lang, ko, en):
+    return ko if lang == 'ko' else en
+
+
 
 # ============================================================================
 #  [폰] 바이옴별 색상표 / 안개 / 하늘(오로라) / 지평선 파노라마 / 장식물 스프라이트 (32종)
@@ -4707,6 +5547,9 @@ SPRITE_DIM = {
     'chimney': (8.0, 22.0, 48, 132), 'pyramid': (14.0, 9.0, 112, 72), 'dome': (10.0, 5.6, 100, 56), 'icespike': (3.6, 6.0, 36, 60),
     'lantern': (1.4, 3.4, 20, 48), 'blocks': (4.0, 5.0, 40, 50), 'dish': (5.0, 6.0, 50, 60), 'sunflower': (3.0, 3.6, 36, 44),
     'cloud': (5.0, 3.0, 60, 36),
+    # 맵 만들기 장애물/장식
+    'cone': (0.75, 0.95, 24, 30), 'drum': (1.25, 1.5, 25, 30), 'crate': (1.8, 1.8, 36, 36), 'tires': (1.9, 1.7, 38, 34),
+    'block': (2.3, 1.2, 46, 24), 'lavapillar': (2.8, 9.5, 28, 95), 'volcano': (44.0, 24.0, 132, 72),
 }
 
 
@@ -5016,6 +5859,70 @@ def make_sprite(kind, th, var):
         _ell(s, c0, cx - 10, ch - 14, 16, 12)
         _ell(s, c0, cx + 6, ch - 18, 18, 15)
         _ell(s, shade_rgb(c0, 1.05), cx - 2, ch - 22, 10, 8)
+    elif kind == 'cone':
+        oc = (255, 118, 24)
+        pygame.draw.rect(s, (40, 40, 44), (2, ch - 4, cw - 4, 4))
+        pygame.draw.polygon(s, oc, [(cx - 9, ch - 4), (cx + 9, ch - 4), (cx + 2, 1), (cx - 2, 1)])
+        pygame.draw.polygon(s, shade_rgb(oc, 0.78), [(cx + 1, 1), (cx + 2, 1), (cx + 9, ch - 4), (cx + 3, ch - 4)])
+        pygame.draw.polygon(s, (250, 250, 250), [(cx - 6.4, ch - 12), (cx + 6.4, ch - 12), (cx + 5.0, ch - 17), (cx - 5.0, ch - 17)])
+        pygame.draw.polygon(s, (250, 250, 250), [(cx - 3.8, ch - 21), (cx + 3.8, ch - 21), (cx + 2.8, ch - 24), (cx - 2.8, ch - 24)])
+    elif kind == 'drum':
+        dc = (36, 120, 220)
+        _rr(s, dc, (2, 3, cw - 4, ch - 3), 3)
+        pygame.draw.rect(s, shade_rgb(dc, 0.72), (cw - 9, 4, 6, ch - 5))
+        for y in (8, ch // 2, ch - 7):
+            pygame.draw.rect(s, shade_rgb(dc, 0.6), (2, y, cw - 4, 2))
+        _ell(s, shade_rgb(dc, 1.25), cx, 4, cw / 2 - 2, 3)
+        pygame.draw.circle(s, (230, 230, 230), (int(cx - 3), 4), 2)
+    elif kind == 'crate':
+        wc = (192, 140, 78)
+        pygame.draw.rect(s, wc, (1, 2, cw - 2, ch - 2))
+        pygame.draw.rect(s, shade_rgb(wc, 0.68), (1, 2, cw - 2, ch - 2), 3)
+        pygame.draw.line(s, shade_rgb(wc, 0.68), (3, 4), (cw - 4, ch - 3), 3)
+        pygame.draw.line(s, shade_rgb(wc, 0.68), (cw - 4, 4), (3, ch - 3), 3)
+        for y in (ch // 3, 2 * ch // 3):
+            pygame.draw.line(s, shade_rgb(wc, 0.85), (3, y), (cw - 4, y), 1)
+        pygame.draw.rect(s, shade_rgb(wc, 1.2), (1, 2, cw - 2, 3))
+    elif kind == 'tires':
+        for k in range(3):
+            y = ch - 11 - k * 10
+            _ell(s, (24, 24, 28), cx, y + 4, cw / 2 - 1, 7)
+            _ell(s, (44, 44, 50), cx, y + 1, cw / 2 - 2, 6)
+            _ell(s, (14, 14, 16), cx, y + 1, cw / 4, 3)
+            pygame.draw.arc(s, (230, 40, 40) if k % 2 == 0 else (240, 240, 240), (2, y - 5, cw - 4, 12), 0.2, 2.9, 2)
+    elif kind == 'block':
+        bc = (226, 226, 230)
+        pygame.draw.polygon(s, bc, [(1, ch), (cw - 1, ch), (cw - 5, ch - 9), (cw - 9, 1), (9, 1), (5, ch - 9)])
+        pygame.draw.polygon(s, shade_rgb(bc, 0.8), [(1, ch), (cw - 1, ch), (cw - 5, ch - 9), (5, ch - 9)])
+        for x in range(4, cw - 6, 10):
+            pygame.draw.polygon(s, (220, 40, 40), [(x + 6, 3), (x + 10, 3), (x + 4, ch - 10), (x, ch - 10)])
+    elif kind == 'lavapillar':
+        bc = mix_rgb(rk[0], (34, 28, 30), 0.6)
+        lava = (255, 120, 24)
+        pygame.draw.rect(s, shade_rgb(bc, 0.8), (2, ch - 8, cw - 4, 8))
+        pygame.draw.polygon(s, bc, [(5, ch - 6), (cw - 5, ch - 6), (cw - 7, 8), (7, 8)])
+        pygame.draw.polygon(s, shade_rgb(bc, 0.7), [(cx + 2, ch - 6), (cw - 5, ch - 6), (cw - 7, 8), (cx + 2, 8)])
+        for k, y in enumerate(range(16, ch - 12, 14)):
+            x0 = 8 + (k * 5) % 9
+            pygame.draw.line(s, lava, (x0, y), (x0 + 6, y + 5), 2)
+            pygame.draw.line(s, (255, 220, 120), (x0 + 6, y + 5), (x0 + 3, y + 10), 1)
+        _ell(s, (255, 90, 20), cx, 8, cw / 2 - 6, 4)
+        _ell(s, (255, 220, 110), cx, 7, cw / 2 - 10, 2)
+        for k in range(3):
+            pygame.draw.circle(s, (255, 150, 40), (int(cx - 5 + k * 5), 4 - k % 2), 2)
+    elif kind == 'volcano':
+        vc = mix_rgb(rk[0], (70, 44, 34), 0.55)
+        lava = (255, 110, 24)
+        pygame.draw.polygon(s, vc, [(0, ch), (cw, ch), (cx + 16, 12), (cx - 16, 12)])
+        pygame.draw.polygon(s, shade_rgb(vc, 0.75), [(cx + 2, ch), (cw, ch), (cx + 16, 12), (cx + 2, 12)])
+        _ell(s, (60, 20, 14), cx, 12, 16, 4)
+        _ell(s, lava, cx, 12, 12, 3)
+        for k, (x1, x2) in enumerate(((cx - 6, cx - 30), (cx + 4, cx + 22), (cx - 1, cx - 8))):
+            pts = [(x1, 14), (x1 + (x2 - x1) * 0.4 + 3, 30 + k * 6), (x2, ch - 6 - k * 8)]
+            pygame.draw.lines(s, lava, False, pts, 3)
+            pygame.draw.lines(s, (255, 210, 110), False, pts, 1)
+        for k in range(4):
+            pygame.draw.circle(s, (255, 160, 60), (int(cx - 9 + k * 6), 6 - (k % 2) * 3), 2)
     return s
 
 
@@ -5297,9 +6204,11 @@ class Cam(object):
 
 
 QUALITY = [  # 내부 해상도 폭, near/mid/far 구간(샘플), 카트 LOD 거리(m)
+    # 낮음/중간: 멀리 있는 길은 2칸·4칸씩 건너뛰어 그리고, 먼 카트는 단순한 모양/점으로 (디테일을 낮춰서 빠르게)
     dict(w=336, near=16, mid=30, far=60, lod0=11.0, lod1=60.0, props=70, parts=True),
     dict(w=440, near=22, mid=44, far=90, lod0=17.0, lod1=90.0, props=140, parts=True),
-    dict(w=580, near=26, mid=54, far=120, lod0=26.0, lod1=120.0, props=220, parts=True),
+    # 높음: 디테일을 낮추지 않는 원래 그래픽 - 보이는 거리 끝까지 길을 한 칸씩, 모든 카트를 완전한 모양으로
+    dict(w=580, near=120, mid=120, far=120, lod0=1e9, lod1=1e9, props=220, parts=True),
 ]
 
 _draw_polygon = pygame.draw.polygon
@@ -5307,6 +6216,7 @@ _FACE_K = (0.98, 0.86, 0.76, 0.90, 1.12)          # FACES 순서: z+, z-, x+, x-
 _log = math.log
 _HEX_A = tuple(k * math.pi / 3.0 for k in range(6))           # 바퀴 육각형 꼭짓점 각도
 _HEX_B = tuple((k + 0.5) * math.pi / 3.0 for k in range(6))     # 트레드 면 가운데 각도
+_OIL_A = tuple(TAU * k / 14.0 for k in range(14))
 
 
 def _prop_metrics(p):
@@ -5945,6 +6855,20 @@ class Renderer(object):
         def P(u, v):
             x, y, z, _h = tr.pose_at(idx + v * hl, d + u * hw_)
             return self.proj(x, y + 0.07, z)
+        kind = pad.get('kind')
+        if kind == 'oil':                       # 기름 웅덩이: 울퉁불퉁한 검은 얼룩 + 무지갯빛 번들거림
+            self.poly((20, 14, 28), [P(math.cos(a) * (0.86 + 0.14 * math.sin(a * 3.0 + 1.0)), math.sin(a) * (0.82 + 0.18 * math.cos(a * 2.0)))
+                                     for a in _OIL_A])
+            self.poly((64, 52, 108), [P(-0.32 + math.cos(a) * 0.3, 0.2 + math.sin(a) * 0.2) for a in _OIL_A[::2]])
+            self.poly((40, 92, 96), [P(0.3 + math.cos(a) * 0.18, -0.28 + math.sin(a) * 0.14) for a in _OIL_A[::2]])
+            return
+        if kind == 'jump':                      # 점프대: 노란 경사판 + 검은 줄무늬 + 흰 화살표
+            self.poly((250, 196, 28), (P(-1, -1), P(1, -1), P(1, 1), P(-1, 1)))
+            for k in range(4):
+                u0 = -1 + k * 0.55
+                self.poly((30, 30, 34), (P(u0, -1), P(u0 + 0.22, -1), P(u0 + 0.22 + 0.3, -0.62), P(u0 + 0.3, -0.62)))
+            self.poly((255, 255, 255), (P(0, 0.85), P(0.75, 0.15), P(0.32, 0.15), P(0.32, -0.45), P(-0.32, -0.45), P(-0.32, 0.15), P(-0.75, 0.15)))
+            return
         self.poly((10, 28, 70), (P(-1, -1), P(1, -1), P(1, 1), P(-1, 1)))
         for n, v0 in enumerate((-0.55, 0.0, 0.55)):
             col = (25, 230, 255) if n % 2 == 0 else (255, 225, 74)
@@ -6851,27 +7775,110 @@ class UI(object):
         return res
 
 
+# ---- 한글(두벌식) 조합 ----
+_HCHO = u'ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ'
+_HJUNG = u'ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ'
+_HJONG = u' ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ'
+_HJUNG_C = {(u'ㅗ', u'ㅏ'): u'ㅘ', (u'ㅗ', u'ㅐ'): u'ㅙ', (u'ㅗ', u'ㅣ'): u'ㅚ', (u'ㅜ', u'ㅓ'): u'ㅝ', (u'ㅜ', u'ㅔ'): u'ㅞ', (u'ㅜ', u'ㅣ'): u'ㅟ',
+            (u'ㅡ', u'ㅣ'): u'ㅢ'}
+_HJONG_C = {(u'ㄱ', u'ㅅ'): u'ㄳ', (u'ㄴ', u'ㅈ'): u'ㄵ', (u'ㄴ', u'ㅎ'): u'ㄶ', (u'ㄹ', u'ㄱ'): u'ㄺ', (u'ㄹ', u'ㅁ'): u'ㄻ', (u'ㄹ', u'ㅂ'): u'ㄼ',
+            (u'ㄹ', u'ㅅ'): u'ㄽ', (u'ㄹ', u'ㅌ'): u'ㄾ', (u'ㄹ', u'ㅍ'): u'ㄿ', (u'ㄹ', u'ㅎ'): u'ㅀ', (u'ㅂ', u'ㅅ'): u'ㅄ'}
+_HJONG_S = dict((v, k) for k, v in _HJONG_C.items())
+_HJUNG_S = dict((v, k) for k, v in _HJUNG_C.items())
+
+
+def _hsyl(cho, jung, jong=0):
+    return chr(0xAC00 + cho * 588 + jung * 28 + jong)
+
+
+def hangul_add(text, j):
+    """text 의 마지막 글자에 자모 j 를 두벌식 규칙으로 붙인다"""
+    last = text[-1:] if text else ''
+    vowel = j in _HJUNG
+    if last and 0xAC00 <= ord(last) <= 0xD7A3:
+        c = ord(last) - 0xAC00
+        cho, jung, jong = c // 588, (c % 588) // 28, c % 28
+        if not vowel:
+            if jong == 0:
+                if j in _HJONG[1:]:
+                    return text[:-1] + _hsyl(cho, jung, _HJONG.index(j))
+            else:
+                cj = _HJONG_C.get((_HJONG[jong], j))
+                if cj:
+                    return text[:-1] + _hsyl(cho, jung, _HJONG.index(cj))
+            return text + j
+        if jong == 0:
+            cj = _HJUNG_C.get((_HJUNG[jung], j))
+            if cj:
+                return text[:-1] + _hsyl(cho, _HJUNG.index(cj))
+            return text + j
+        jc = _HJONG[jong]
+        keep, move = _HJONG_S.get(jc, (None, jc))
+        if move in _HCHO:
+            prev = _hsyl(cho, jung, _HJONG.index(keep) if keep else 0)
+            return text[:-1] + prev + _hsyl(_HCHO.index(move), _HJUNG.index(j))
+        return text + j
+    if last and last in _HCHO and vowel:
+        return text[:-1] + _hsyl(_HCHO.index(last), _HJUNG.index(j))
+    if last and last in _HJUNG and vowel:
+        cj = _HJUNG_C.get((last, j))
+        if cj:
+            return text[:-1] + cj
+    return text + j
+
+
+def hangul_back(text):
+    """한 자모씩 지우기 (각 -> 가 -> ㄱ)"""
+    last = text[-1:] if text else ''
+    if last and 0xAC00 <= ord(last) <= 0xD7A3:
+        c = ord(last) - 0xAC00
+        cho, jung, jong = c // 588, (c % 588) // 28, c % 28
+        if jong:
+            sp = _HJONG_S.get(_HJONG[jong])
+            return text[:-1] + _hsyl(cho, jung, _HJONG.index(sp[0]) if sp else 0)
+        sp = _HJUNG_S.get(_HJUNG[jung])
+        if sp:
+            return text[:-1] + _hsyl(cho, _HJUNG.index(sp[0]))
+        return text[:-1] + _HCHO[cho]
+    return text[:-1]
+
+
 class OnScreenKeyboard(object):
-    """텍스트/IP 입력용 화면 키보드 (모바일 소프트 키보드가 불안정해서 직접 그린다)"""
+    """텍스트/IP 입력용 화면 키보드 (모바일 소프트 키보드가 불안정해서 직접 그린다). mode 'text' = 한글/영문 전환 가능"""
 
     def __init__(self, title, text, mode, maxlen, on_ok):
         self.title, self.text, self.mode, self.maxlen, self.on_ok = title, text, mode, maxlen, on_ok
         self.shift = False
         self.blink = 0.0
+        self.ko = mode == 'text'
 
     def rows(self):
         if self.mode == 'ip':
             return ['123', '456', '789', '.0:']
+        if self.mode == 'text' and self.ko:
+            if self.shift:
+                return ['1234567890', u'ㅃㅉㄸㄲㅆㅛㅕㅑㅒㅖ', u'ㅁㄴㅇㄹㅎㅗㅓㅏㅣ', u'ㅋㅌㅊㅍㅠㅜㅡ!?']
+            return ['1234567890', u'ㅂㅈㄷㄱㅅㅛㅕㅑㅐㅔ', u'ㅁㄴㅇㄹㅎㅗㅓㅏㅣ', u'ㅋㅌㅊㅍㅠㅜㅡ-.']
         rs = ['1234567890', 'qwertyuiop', 'asdfghjkl-', 'zxcvbnm_.']
         return [r.upper() if self.shift else r for r in rs]
 
     def key(self, ch):
+        if ch in _HCHO or ch in _HJUNG:
+            t = hangul_add(self.text, ch)
+            if len(t) <= self.maxlen:
+                self.text = t
+            if self.shift:
+                self.shift = False
+            return
         if len(self.text) < self.maxlen:
             self.text += ch
 
+    def backspace(self):
+        self.text = hangul_back(self.text) if self.mode == 'text' else self.text[:-1]
+
     def handle_key_event(self, e):
         if e.key == pygame.K_BACKSPACE:
-            self.text = self.text[:-1]
+            self.backspace()
         elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
             return 'ok'
         elif e.key == pygame.K_ESCAPE:
@@ -6917,19 +7924,29 @@ class OnScreenKeyboard(object):
         bw3 = (total_w - 3 * gx) // 4
         specs = []
         if self.mode != 'ip':
-            specs.append(('Aa', 'chipon' if self.shift else 'normal', 'shift'))
+            specs.append(('Aa' if not self.ko else u'쌍', 'chipon' if self.shift else 'normal', 'shift'))
         else:
             specs.append(('', 'ghost', None))
+        if self.mode == 'text':
+            specs.append((u'한/A', 'chipon' if self.ko else 'normal', 'lang'))
+            specs.append((u'띄움' if self.ko else 'Space', 'normal', 'space'))
         specs += [('<-', 'normal', 'bs'), (T('취소', 'Cancel'), 'ghost', 'cancel'), ('OK', 'primary', 'ok')]
+        bw3 = (total_w - (len(specs) - 1) * gx) // len(specs)
         for i, (lab, kind, act) in enumerate(specs):
             r = pygame.Rect(x0 + i * (bw3 + gx), by, bw3, kh)
             if act is None:
                 continue
-            if ui.button(surf, r, lab, kind, size=kh * 0.46):
+            if ui.button(surf, r, lab, kind, size=kh * 0.42):
                 if act == 'shift':
                     self.shift = not self.shift
+                elif act == 'lang':
+                    self.ko = not self.ko
+                    self.shift = False
+                elif act == 'space':
+                    if len(self.text) < self.maxlen:
+                        self.text += ' '
                 elif act == 'bs':
-                    self.text = self.text[:-1]
+                    self.backspace()
                 else:
                     res = act
         ui.taps[:] = []        # 키보드가 떠 있는 동안 다른 위젯이 탭을 받지 않게
@@ -7055,7 +8072,7 @@ def draw_hud(app, surf, race, dt):
         app.mini = build_minimap(race.track, ms, None)
     mx, my = sw - ms - 12 * u, 10 * u
     draw_minimap(ui, surf, app.mini[0], app.mini[1], race, int(mx), int(my))
-    ui.text(surf, '#%d %s' % (race.map_id, race.track.info['name' if LANG == 'ko' else 'name_en']), sw - 14 * u, my + ms + 2 * u, 15 * u, (215, 225, 250), 'r')
+    ui.text(surf, map_title(race.map_id, LANG), sw - 14 * u, my + ms + 2 * u, 15 * u, (215, 225, 250), 'r')
     # 속도계
     kmh = int(sim.speed * 3.6)
     cx = int(sw * 0.70) if sw > sh else sw // 2 + int(sw * 0.18)
@@ -7519,6 +8536,9 @@ class App(object):
         self.show_fps = bool(args.get('fps'))
         self.finish_at = None
         self.ping = 0.0
+        self.store = MapStore()           # 내가 만든 맵 목록
+        self.maker = PhoneMapMaker(self)  # 맵 만들기 화면
+        self.test_map = None              # 편집기에서 '시험 주행' 중인 맵
 
     # ------------------------------------------------------------------ 공통 도우미
     @property
@@ -7630,6 +8650,16 @@ class App(object):
                 self.keys.discard(e.key)
             elif e.type == getattr(pygame, 'VIDEORESIZE', -1):
                 pass
+            elif self.scene == 'editor' and e.type == getattr(pygame, 'MOUSEWHEEL', -1):
+                self.maker.wheel += e.y
+            elif self.scene == 'editor' and e.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP) and getattr(e, 'button', 1) in (2, 3, 4, 5):
+                if e.button in (2, 3):
+                    self.maker.rdrag = e.pos if e.type == pygame.MOUSEBUTTONDOWN else None
+            elif self.scene == 'editor' and e.type == pygame.MOUSEMOTION and self.maker.rdrag is not None:
+                a = self.maker.rdrag
+                if self.maker.view is not None:
+                    self.maker.pan(e.pos[0] - a[0], e.pos[1] - a[1])
+                self.maker.rdrag = e.pos
             else:
                 self.ptr.handle(e, self.W, self.H)
         if self.screen.get_size() != (self.W, self.H):
@@ -7642,9 +8672,11 @@ class App(object):
             self.toggle_pause()
         elif self.scene == 'results':
             self.leave_race()
-        elif self.scene in ('solo', 'garage', 'settings', 'multi'):
+        elif self.scene in ('solo', 'garage', 'settings', 'multi', 'maps'):
             self.profile.save()
             self.go('menu')
+        elif self.scene == 'editor':
+            self.maker.on_back()
         elif self.scene == 'lobby':
             self.session.leave()
             self.go('menu')
@@ -7679,17 +8711,29 @@ class App(object):
         return {'steer': self.steer, 'throttle': 1.0 if (gas or (auto and not brake)) else 0.0, 'brake': 1.0 if brake else 0.0, 'drift': drift}, pressed
 
     # ------------------------------------------------------------------ 레이스
+    def solo_map(self):
+        """솔로로 달릴 맵: 시험 주행 중이면 그 맵, '내 맵' 을 골랐으면 그 데이터, 아니면 기본 맵 번호"""
+        if self.test_map is not None:
+            return self.test_map
+        if self.profile['map_src'] == 'custom':
+            d = self.store.get(self.profile['cmap'])
+            if d is not None:
+                return d
+        return int(self.profile['map'])
+
     def start_solo(self):
         p = self.profile
         entries = solo_entries(p.display_name(), p['kart'], int(p['bots']))
-        self.start_race(int(p['map']), int(p['laps']), entries, False, True, 5.0, p['mode'] == 'item')
+        ref = self.solo_map()
+        self.start_race(ref, int(p['laps']) if self.test_map is None else int(ref['laps']), entries, False, True,
+                        5.0 if self.test_map is None else 3.0, p['mode'] == 'item')
 
     def use_item(self, slot):
         if self.race is not None and self.race.items is not None and not (self.paused and not self.race.multi):
             self.race.use_item(slot, self.brake_held)
 
     def start_race(self, map_id, laps, entries, multi, is_host, countdown, items=False):
-        self.loading(T('맵 생성 중…', 'Building map…') + ' #%d' % map_id)
+        self.loading(T('맵 생성 중…', 'Building map…') + ' ' + map_title(map_id, LANG))
         self.race = Race(map_id, laps, entries, multi=multi, is_host=is_host, countdown=countdown, net=self.session.net if multi else None, items=items)
         self.hud_top = 0
         self.renderer.set_track(self.race.track)
@@ -7731,6 +8775,12 @@ class App(object):
         self.show_map = None
         if multi:
             self.session.leave()
+        if self.test_map is not None:
+            self.test_map = None
+            if self.maker.ed is not None:
+                self.maker.changed()
+                self.go('editor')
+                return
         self.go('menu')
 
     def handle_race_events(self, race):
@@ -7764,6 +8814,12 @@ class App(object):
                 elif e in ('wall', 'bump'):
                     self.sfx.play('bump')
                     self.renderer.shake = max(self.renderer.shake, 0.6)
+                elif e == 'jump':
+                    self.sfx.play('lap', 0.7)
+                    self.toast(T('점프!', 'JUMP!'), 0.7, (255, 225, 80))
+                elif e == 'oil':
+                    self.sfx.play('ihit', 0.6)
+                    self.toast(T('미끌!', 'SLIPPERY!'), 0.8, (190, 150, 255))
                 elif e.startswith('tier'):
                     self.sfx.play('tier')
 
@@ -8018,7 +9074,7 @@ class App(object):
 
     # ------------------------------------------------------------------ 맵 선택기
     def outline(self, mid, w, h):
-        key = (mid, w, h)
+        key = (mid if not isinstance(mid, dict) else ('c', cmap_key(mid)), w, h)
         hit = self.outline_cache.get(key)
         if hit is not None:
             return hit
@@ -8095,6 +9151,69 @@ class App(object):
                 new = rr_
         return new
 
+    def source_tabs(self, rect, src, enabled=True):
+        """[기본 맵 1000] [내가 만든 맵] 전환 -> 새 값"""
+        ui = self.ui
+        u = ui.u
+        half = (rect.w - 8 * u) / 2.0
+        if ui.button(self.screen, R(rect.x, rect.y, half, rect.h), T('기본 맵 1000개', 'Built-in maps'), 'chipon' if src != 'custom' else 'chip',
+                     size=rect.h * 0.4, enabled=enabled):
+            src = 'builtin'
+        if ui.button(self.screen, R(rect.x + half + 8 * u, rect.y, half, rect.h), T('내가 만든 맵 (%d)' % len(self.store.maps), 'My maps (%d)' % len(self.store.maps)),
+                     'chipon' if src == 'custom' else 'chip', size=rect.h * 0.4, enabled=enabled):
+            src = 'custom'
+        return src
+
+    def custom_view(self, rect, d, title=None):
+        """만든 맵 정보 + 코스 모양 (읽기 전용)"""
+        ui = self.ui
+        u = ui.u
+        surf = self.screen
+        ui.panel(surf, rect, 195)
+        pad = int(12 * u)
+        x, y, w = rect.x + pad, rect.y + pad, rect.w - 2 * pad
+        ui.text(surf, title or T('내가 만든 맵', 'Custom map'), x, y, 20 * u, (255, 200, 90))
+        ui.text(surf, map_title(d, LANG), x, y + 24 * u, 30 * u)
+        oh = int(max(40 * u, rect.h - 150 * u))
+        out, length = self.outline(d, int(w), oh)
+        th = biome(d['look'])
+        nobs = sum(1 for o in d['objs'] if OBJ_INFO[o[0]]['cat'] == 'obs')
+        ui.text(surf, T('%s · %.2f km · 장애물 %d · 물건 %d', '%s · %.2f km · %d obstacles · %d objects') % (th['name'] if LANG == 'ko' else th['en'], length / 1000.0, nobs, len(d['objs'])),
+                x, y + 58 * u, 18 * u, (190, 205, 240))
+        surf.blit(out, (x, y + 84 * u))
+        return y + 88 * u + oh
+
+    def custom_picker(self, rect, editable=True, allow_edit=True):
+        """'내 맵' 고르기 (◀ ▶ 로 바꾸기 + 편집). 반환: 고른 맵 데이터 또는 None"""
+        ui = self.ui
+        u = ui.u
+        surf = self.screen
+        maps = self.store.maps
+        if not maps:
+            ui.panel(surf, rect, 195)
+            ui.text(surf, T('아직 만든 맵이 없어요', 'You have no custom maps yet'), rect.x + 16 * u, rect.y + 20 * u, 26 * u)
+            if ui.button(surf, R(rect.x + 16 * u, rect.y + 70 * u, min(rect.w - 32 * u, 320 * u), 56 * u), T('맵 만들러 가기', 'Open map maker'), 'good', enabled=editable):
+                self.go('maps')
+            return None
+        i = max(0, self.store.index(self.profile['cmap']))
+        d = maps[i]
+        bh = max(36 * u, min(50 * u, rect.h * 0.12))
+        body = R(rect.x, rect.y, rect.w, rect.h - bh - 8 * u)
+        self.custom_view(body, d)
+        y = body.bottom + 8 * u
+        bw = (rect.w - 16 * u) / (3.0 if allow_edit else 2.0)
+        if ui.button(surf, R(rect.x, y, bw, bh), '<', 'normal', size=bh * 0.5, enabled=editable and len(maps) > 1):
+            i = (i - 1) % len(maps)
+        if ui.button(surf, R(rect.x + bw + 8 * u, y, bw, bh), '>  %d/%d' % (i + 1, len(maps)), 'normal', size=bh * 0.4, enabled=editable and len(maps) > 1):
+            i = (i + 1) % len(maps)
+        if allow_edit and ui.button(surf, R(rect.x + 2 * (bw + 8 * u), y, bw, bh), T('편집', 'Edit'), 'good', size=bh * 0.42, enabled=editable):
+            self.maker.open(d, d['uid'])
+            return d
+        d = maps[i]
+        if self.profile['cmap'] != d['uid']:
+            self.profile['cmap'] = d['uid']
+        return d
+
     # ------------------------------------------------------------------ 메뉴
     def scene_menu(self, dt):
         ui = self.ui
@@ -8115,10 +9234,11 @@ class App(object):
         ui.text(surf, tag, x, int(self.H * 0.05) + 160 * u, tsz, (205, 220, 250), anc)
         bw = self.W * 0.40 if land else self.W * 0.82
         bx = int(self.W * 0.06) if land else (self.W - bw) / 2
-        by = self.H * 0.43 if land else self.H * 0.40
-        bh = min(self.H * 0.095, 60 * u)
+        by = self.H * 0.40 if land else self.H * 0.40
+        bh = min(self.H * 0.085, 58 * u)
         gap = bh * 0.2
         items = [(T('솔로 레이스', 'Solo race'), 'solo', 'primary'), (T('WiFi 멀티플레이', 'WiFi multiplayer'), 'multi', 'primary'),
+                 (T('맵 만들기', 'Map maker'), 'maps', 'good'),
                  (T('차고 (카트 꾸미기)', 'Garage (customize)'), 'garage', 'normal'), (T('설정', 'Settings'), 'settings', 'normal')]
         for i, (lab, tgt, kind) in enumerate(items):
             if ui.button(surf, R(bx, by + i * (bh + gap), bw, bh), lab, kind):
@@ -8144,7 +9264,18 @@ class App(object):
         else:
             pr = R(m, m, self.W - 2 * m, self.H * 0.58)
             rr = R(m, self.H * 0.58 + 2 * m, self.W - 2 * m, self.H * 0.42 - 3 * m)
-        self.sel_map = self.map_picker(pr, self.sel_map)
+        tab_h = int(min(46 * u, pr.h * 0.1))
+        src = self.source_tabs(R(pr.x, pr.y, pr.w, tab_h), self.profile['map_src'])
+        if src != self.profile['map_src']:
+            self.profile['map_src'] = src
+            self.profile.save()
+        body = R(pr.x, pr.y + tab_h + 8 * u, pr.w, pr.h - tab_h - 8 * u)
+        if src == 'custom':
+            self.custom_picker(body)
+            if self.scene != 'solo':
+                return
+        else:
+            self.sel_map = self.map_picker(body, self.sel_map)
         ui.panel(surf, rr, 195)
         x, y, w = rr.x + 14 * u, rr.y + 14 * u, rr.w - 28 * u
         ui.text(surf, T('레이스 설정', 'Race settings'), x, y, 28 * u, (255, 255, 255))
@@ -8293,6 +9424,10 @@ class App(object):
             LANG = ('ko' if self.font_path else 'en') if code == 'auto' else code
             self.profile.save()
         chips(T('그래픽 품질', 'Graphics'), [T('낮음', 'Low'), T('중간', 'Medium'), T('높음', 'High')], self.renderer.q, pick_quality)
+        y -= 6 * u * kk
+        ui.text(surf, T('높음 = 디테일을 줄이지 않는 원래 그래픽 · 낮음/중간 = 먼 곳 디테일을 줄여서 더 빠르게',
+                        'High = full original detail · Low/Medium = less distant detail for speed'), x, y, 16 * u * kk, (170, 190, 230))
+        y += 24 * u * kk
         chips(T('조향 반응 (키보드/버튼)', 'Steering response (keys/buttons)'), [T('부드럽게', 'Smooth'), T('보통', 'Normal'), T('빠르게', 'Quick')], int(self.profile['steer_resp']), pick_steer)
         for key, lab in (('auto_gas', T('자동 가속 (터치)', 'Auto gas (touch)')), ('sound', T('소리', 'Sound'))):
             on = bool(self.profile[key])
@@ -8350,7 +9485,9 @@ class App(object):
         bh = 56 * u
         half = (w - 12 * u) / 2.0
         if ui.button(surf, R(x, y, half, bh), T('방 만들기 (호스트)', 'Host a game'), 'primary'):
-            if self.session.host_game(int(self.profile['port'])):
+            cm = self.store.get(self.profile['cmap']) if self.profile['map_src'] == 'custom' else None
+            self.lobby_src = 'custom' if cm else 'builtin'
+            if self.session.host_game(int(self.profile['port']), cm):
                 self.scene = 'lobby'
             else:
                 self.err = self.session.error
@@ -8367,7 +9504,8 @@ class App(object):
         elif not rooms:
             ui.text(surf, T('방을 찾지 못했어요. 친구가 [방 만들기] 후 IP 로 접속하세요.', 'No rooms found. Ask a friend to host, then use Join by IP.'), x, y, 18 * u, (190, 205, 240))
         for i, rm in enumerate(rooms[:5]):
-            label = '%s  %s  ·  %d/%d  ·  #%s  ·  %s' % (rm.get('name', 'room'), rm['ip'], rm.get('players', 0), RoomServer.MAX_PLAYERS, rm.get('map', '?'), rm.get('state', ''))
+            mlab = (u'\u2605 ' + str(rm['cname'])) if rm.get('cname') else '#%s' % rm.get('map', '?')
+            label = '%s  %s  ·  %d/%d  ·  %s  ·  %s' % (rm.get('name', 'room'), rm['ip'], rm.get('players', 0), RoomServer.MAX_PLAYERS, mlab, rm.get('state', ''))
             if ui.button(surf, R(x, y, w, 48 * u), label, 'normal', size=19 * u, enabled=rm.get('state') == 'lobby'):
                 self.profile['last_ip'] = rm['ip']
                 self.session.join_game(rm['ip'], rm.get('port', DEFAULT_PORT))
@@ -8392,7 +9530,8 @@ class App(object):
             msg = ses.start_msg
             ses.start_msg = None
             entries = ses.entries_from_start(msg)
-            self.start_race(int(msg['map']), int(msg['laps']), entries, True, ses.is_host, float(msg.get('countdown', 5.0)), bool(msg.get('items')))
+            ref = msg.get('cmap') or int(msg['map'])
+            self.start_race(ref, int(msg['laps']), entries, True, ses.is_host, float(msg.get('countdown', 5.0)), bool(msg.get('items')))
             return
         if ses.state == 'idle':
             self.err = ses.error or T('연결이 끊어졌어요', 'Disconnected')
@@ -8434,10 +9573,41 @@ class App(object):
             return
         # 오른쪽: 설정
         st = ses.settings
-        mid = self.map_picker(R(rr.x, rr.y, rr.w, rr.h - 196 * u), int(st['map']), editable=ses.is_host)
-        if ses.is_host and mid != st['map']:
-            ses.send_settings(map=mid)
-            self.profile['map'] = mid
+        prect = R(rr.x, rr.y, rr.w, rr.h - 196 * u)
+        cm = st.get('cmap')
+        if ses.is_host:
+            tab_h = int(min(42 * u, prect.h * 0.1))
+            if getattr(self, 'lobby_src', None) is None:
+                self.lobby_src = 'custom' if cm else 'builtin'
+            src = self.source_tabs(R(prect.x, prect.y, prect.w, tab_h), self.lobby_src)
+            self.lobby_src = src
+            body = R(prect.x, prect.y + tab_h + 6 * u, prect.w, prect.h - tab_h - 6 * u)
+            if src == 'custom':
+                d = self.custom_picker(body, editable=True, allow_edit=False)
+                if self.scene != 'lobby':
+                    return
+                if d is not None and (cm is None or cmap_key(cm) != cmap_key(d) or cm.get('name') != d['name']):
+                    if time.time() - getattr(self, '_cm_sent', 0.0) > 0.6:      # 서버가 되돌려줄 때까지 반복 전송 안 함
+                        ses.send_settings(cmap=d)
+                        self._cm_sent = time.time()
+                    self.profile['map_src'] = 'custom'
+            else:
+                if cm is not None and time.time() - getattr(self, '_cm_sent', 0.0) > 0.6:
+                    ses.send_settings(map=int(st['map']))
+                    self._cm_sent = time.time()
+                mid = self.map_picker(body, int(st['map']), editable=True)
+                if mid != st['map']:
+                    ses.send_settings(map=mid)
+                    self.profile['map'] = mid
+                self.profile['map_src'] = 'builtin'
+        elif cm:
+            bh = 46 * u
+            self.custom_view(R(prect.x, prect.y, prect.w, prect.h - bh - 8 * u), cm, T('방장이 고른 맵 (직접 만든 맵)', "Host's custom map"))
+            if ui.button(surf, R(prect.x, prect.bottom - bh, prect.w, bh), T('이 맵을 내 맵에 저장', 'Save this map to My maps'), 'good', size=bh * 0.4):
+                if self.store.add_copy(cm):
+                    self.toast(T('내 맵에 저장했어요', 'Saved to My maps'), 2.0)
+        else:
+            self.map_picker(prect, int(st['map']), editable=False)
         ui.panel(surf, R(rr.x, rr.bottom - 186 * u, rr.w, 186 * u), 205)
         sx, sy, sw_ = rr.x + 14 * u, rr.bottom - 180 * u, rr.w - 28 * u
         half = (sw_ - 12 * u) / 2.0
@@ -8519,8 +9689,990 @@ class App(object):
             self.scene_multi(dt)
         elif sc == 'lobby':
             self.scene_lobby(dt)
+        elif sc == 'maps':
+            self.maker.scene_maps(dt)
+        elif sc == 'editor':
+            self.maker.scene_editor(dt)
         else:
             self.scene = 'menu'
+
+
+# ============================================================================
+#  [폰] 맵 만들기: 내 맵 목록 + 편집기
+#   길 그리기 / 점 옮기기·추가·삭제 / 높낮이 / 출발점 / 장애물 / 나무·화산 기둥 / 발판·상자 / 세부 설정
+# ============================================================================
+ED_TABS = [('road', '길', 'Road'), ('obs', '장애물', 'Obstacles'), ('deco', '나무·장식', 'Nature'), ('pad', '발판·상자', 'Pads'),
+           ('set', '설정', 'Settings')]
+ED_ROAD_TOOLS = [('draw', '길 그리기', 'Draw road'), ('move', '점 옮기기', 'Move point'), ('add', '점 추가', 'Add point'),
+                 ('del', '점 지우기', 'Delete point'), ('up', '높이기', 'Raise'), ('down', '낮추기', 'Lower'),
+                 ('start', '출발점', 'Start line'), ('pan', '화면 이동', 'Pan view')]
+ED_HINT = {
+    'draw': ('손가락으로 코스 모양을 한 바퀴 그리세요 (끝은 처음과 자동으로 이어져요)', 'Draw one lap of the course (the end joins the start)'),
+    'move': ('점을 끌어서 옮기세요 (빈 곳을 끌면 화면 이동)', 'Drag a point to move it (drag empty space to pan)'),
+    'add': ('길 근처를 누르면 그 자리에 점이 생겨요', 'Tap near the road to add a point'),
+    'del': ('지울 점을 누르세요', 'Tap a point to delete it'),
+    'up': ('누른 점 부근의 길이 4m 높아져요', 'Tap a point to raise the road 4 m'),
+    'down': ('누른 점 부근의 길이 4m 낮아져요', 'Tap a point to lower the road 4 m'),
+    'start': ('출발선이 될 점을 누르세요', 'Tap the point for the start line'),
+    'pan': ('끌어서 화면 이동 · 두 손가락으로 확대/축소', 'Drag to pan · pinch to zoom'),
+    'erase': ('누르거나 문질러서 물건 지우기', 'Tap or rub to erase objects'),
+    'place': ('누르면 놓기 · 끌면 화면 이동', 'Tap to place · drag to pan'),
+    'line': ('끌어서 선을 따라 줄지어 놓기', 'Drag to place a row along your line'),
+}
+
+
+class PhoneMapMaker(object):
+    def __init__(self, app):
+        self.app = app
+        self.ed = None
+        self.uid = None
+        self.tab = 'road'
+        self.tool = 'draw'
+        self.kinds = {'obs': 'cone', 'deco': 'pine', 'pad': 'pad'}
+        self.erase = False
+        self.line = False
+        self.size = 1.0
+        self.view = None
+        self.canvas = None
+        self.blocks = []
+        self.g = None              # 진행 중인 손가락 동작
+        self.stroke = None
+        self.drag_pt = -1
+        self.block_taps = False    # 이번 프레임의 탭은 끌기/두 손가락 동작의 끝이라 무시
+        self.wheel = 0.0
+        self.rdrag = None          # 마우스 오른쪽 끌기 (화면 이동)
+        self.ver = 0
+        self.cv_key = None
+        self.cv_surf = None
+        self.confirm = None
+        self.page = 0
+        self.set_page = 0
+        self.deco_page = 0
+        self.msg = ''
+        self.msg_t = 0.0
+        self.import_mid = 1
+        self.info_cache = {}
+        self.test_uid = None
+
+    # ------------------------------------------------------------------ 공통
+    def say(self, ko, en, secs=2.2):
+        self.msg = T(ko, en)
+        self.msg_t = time.time() + secs
+
+    def open(self, data, uid):
+        self.ed = MapEdit(data)
+        self.uid = uid
+        self.view = None
+        self.g = None
+        self.stroke = None
+        self.drag_pt = -1
+        self.confirm = None
+        self.ver += 1
+        if not uid:
+            self.tab, self.tool = 'road', 'draw'
+            self.say('먼저 [길 그리기]로 코스를 그려 보세요. 기본 타원 코스로 바로 달릴 수도 있어요',
+                     'Draw your course with [Draw road] - or race the default oval right away', 5.0)
+        self.app.go('editor')
+
+    def changed(self):
+        self.ver += 1
+
+    def save(self):
+        d = self.ed.result()
+        if d is None:
+            self.say('저장할 수 없어요', 'Cannot save')
+            return False
+        d['uid'] = self.uid or ''
+        uid = self.app.store.put(d)
+        if uid is None:
+            self.say('저장 실패', 'Save failed')
+            return False
+        self.uid = uid
+        self.ed.data['uid'] = uid
+        self.ed.dirty = False
+        self.info_cache.pop(uid, None)
+        self.say('저장했어요', 'Saved')
+        return True
+
+    def map_info_of(self, d):
+        key = d['uid'] + str(cmap_key(d))
+        hit = self.info_cache.get(key)
+        if hit is None:
+            try:
+                tr = Track(d, True)
+                length = tr.length
+            except Exception:
+                length = 0.0
+            nobs = sum(1 for o in d['objs'] if OBJ_INFO[o[0]]['cat'] == 'obs')
+            ndeco = sum(1 for o in d['objs'] if OBJ_INFO[o[0]]['cat'] == 'deco')
+            npad = len(d['objs']) - nobs - ndeco
+            hit = self.info_cache[key] = (length, nobs, ndeco, npad)
+            if len(self.info_cache) > 120:
+                self.info_cache.clear()
+        return hit
+
+    # ------------------------------------------------------------------ 화면 좌표
+    def fit(self):
+        d = self.ed.data
+        xs = [p[0] for p in d['pts']] + [o[1] for o in d['objs']]
+        zs = [p[1] for p in d['pts']] + [o[2] for o in d['objs']]
+        cv = self.canvas
+        x0, x1, z0, z1 = min(xs) - 40, max(xs) + 40, min(zs) - 40, max(zs) + 40
+        sc = min(cv.w / max(x1 - x0, 60.0), cv.h / max(z1 - z0, 60.0))
+        self.view = [(x0 + x1) / 2.0, (z0 + z1) / 2.0, clamp(sc, 0.08, 12.0)]
+
+    def to_screen(self, x, z):
+        cx, cz, sc = self.view
+        cv = self.canvas
+        return (cv.centerx + (x - cx) * sc, cv.centery + (z - cz) * sc)
+
+    def to_world(self, sx, sy):
+        cx, cz, sc = self.view
+        cv = self.canvas
+        return (cx + (sx - cv.centerx) / sc, cz + (sy - cv.centery) / sc)
+
+    def zoom(self, k, sx=None, sy=None):
+        cv = self.canvas
+        if sx is None:
+            sx, sy = cv.centerx, cv.centery
+        wx, wz = self.to_world(sx, sy)
+        self.view[2] = clamp(self.view[2] * k, 0.08, 12.0)
+        nx, nz = self.to_world(sx, sy)
+        self.view[0] += wx - nx
+        self.view[1] += wz - nz
+        self.clamp_view()
+
+    def pan(self, dx, dy):
+        sc = self.view[2]
+        self.view[0] -= dx / sc
+        self.view[1] -= dy / sc
+        self.clamp_view()
+
+    def clamp_view(self):
+        W = CMAP_WORLD + 200
+        self.view[0] = clamp(self.view[0], -W, W)
+        self.view[1] = clamp(self.view[1], -W, W)
+
+    def hit_m(self):
+        return 26.0 * self.app.ui.u / self.view[2]
+
+    # ------------------------------------------------------------------ 목록 화면
+    def scene_maps(self, dt):
+        app = self.app
+        ui = app.ui
+        u = ui.u
+        surf = app.screen
+        app.draw_show(dt, app.profile['kart'], shift=0.0)
+        store = app.store
+        pw = min(app.W - 28 * u, 900 * u)
+        r = R((app.W - pw) / 2, 14 * u, pw, app.H - 28 * u)
+        ui.panel(surf, r, 222)
+        x, y, w = r.x + 18 * u, r.y + 14 * u, r.w - 36 * u
+        ui.text(surf, T('맵 만들기', 'Map maker'), x, y, 34 * u)
+        ui.text(surf, T('내 맵 %d개' % len(store.maps), '%d maps' % len(store.maps)), r.right - 18 * u, y + 8 * u, 22 * u, (255, 220, 120), 'r')
+        y += 52 * u
+        bh = 52 * u
+        third = (w - 2 * 10 * u) / 3.0
+        if ui.button(surf, R(x, y, third, bh), T('+ 새 맵', '+ New map'), 'primary', size=22 * u):
+            n = len(store.maps) + 1
+            self.open(cmap_new(T('나의 맵 %d' % n, 'My map %d' % n), int(app.profile['map'])), None)
+            return
+        if ui.button(surf, R(x + third + 10 * u, y, third, bh), T('기본 맵 코스로 시작', 'Start from a map'), 'normal', size=19 * u):
+            mid = int(self.import_mid)
+            d = cmap_from_builtin(mid, map_info(mid)['name' if LANG == 'ko' else 'name_en'])
+            self.open(d, None)
+            return
+        d_ = ui.stepper(surf, R(x + 2 * (third + 10 * u), y + 4 * u, third, bh - 8 * u), '', '#%d' % self.import_mid)
+        if d_:
+            self.import_mid = ((self.import_mid - 1 + d_) % MAP_COUNT) + 1
+        y += bh + 14 * u
+        rows_h = r.bottom - 76 * u - y
+        per = max(1, int(rows_h // (74 * u)))
+        npg = max(1, (len(store.maps) + per - 1) // per)
+        self.page = int(clamp(self.page, 0, npg - 1))
+        if not store.maps:
+            ui.text(surf, T('아직 만든 맵이 없어요. [+ 새 맵]을 눌러 보세요!', 'No maps yet. Tap [+ New map]!'), x, y + 10 * u, 22 * u, (190, 205, 240))
+        for i, d in enumerate(store.maps[self.page * per:(self.page + 1) * per]):
+            row = R(x, y, w, 66 * u)
+            ui.panel(surf, row, 120, (40, 54, 96), int(10 * u))
+            length, nobs, ndeco, npad = self.map_info_of(d)
+            ui.text(surf, d['name'], row.x + 12 * u, row.y + 6 * u, 26 * u)
+            th = biome(d['look'])
+            sub = T('%.2f km · 장애물 %d · 장식 %d · 발판/상자 %d · %s' % (length / 1000.0, nobs, ndeco, npad, th['name']),
+                    '%.2f km · %d obstacles · %d deco · %d pads/boxes · %s' % (length / 1000.0, nobs, ndeco, npad, th['en']))
+            ui.text(surf, sub, row.x + 12 * u, row.y + 38 * u, 16 * u, (190, 205, 240))
+            bw = 92 * u
+            bx = row.right - 3 * (bw + 8 * u)
+            if ui.button(surf, R(bx, row.y + 10 * u, bw, 46 * u), T('편집', 'Edit'), 'normal', size=20 * u):
+                self.open(d, d['uid'])
+                return
+            if ui.button(surf, R(bx + bw + 8 * u, row.y + 10 * u, bw, 46 * u), T('달리기', 'Race'), 'good', size=20 * u):
+                app.profile['map_src'] = 'custom'
+                app.profile['cmap'] = d['uid']
+                app.profile.save()
+                app.go('solo')
+                return
+            dk = 'danger' if self.confirm == ('del', d['uid']) else 'ghost'
+            if ui.button(surf, R(bx + 2 * (bw + 8 * u), row.y + 10 * u, bw, 46 * u), T('정말?', 'Sure?') if dk == 'danger' else T('삭제', 'Delete'), dk, size=20 * u):
+                if self.confirm == ('del', d['uid']):
+                    store.delete(d['uid'])
+                    self.confirm = None
+                    if app.profile['cmap'] == d['uid']:
+                        app.profile['cmap'] = ''
+                        app.profile['map_src'] = 'builtin'
+                else:
+                    self.confirm = ('del', d['uid'])
+            y += 74 * u
+        if npg > 1:
+            py_ = r.bottom - 124 * u
+            if ui.button(surf, R(x, py_, 90 * u, 40 * u), '<', 'normal', enabled=self.page > 0):
+                self.page -= 1
+            ui.text(surf, '%d / %d' % (self.page + 1, npg), x + 130 * u, py_ + 6 * u, 22 * u, (230, 235, 255), 'c')
+            if ui.button(surf, R(x + 170 * u, py_, 90 * u, 40 * u), '>', 'normal', enabled=self.page < npg - 1):
+                self.page += 1
+        ui.text(surf, T('파일: kart3d_maps.json (폰/PC 같은 형식)', 'File: kart3d_maps.json (same format on phone/PC)'), x + 220 * u, r.bottom - 40 * u, 15 * u, (150, 165, 200))
+        if ui.button(surf, R(x, r.bottom - 46 * u - 8 * u, 200 * u, 46 * u), T('뒤로', 'Back'), 'ghost'):
+            app.go('menu')
+
+    # ------------------------------------------------------------------ 편집기
+    def layout(self):
+        app = self.app
+        u = app.ui.u
+        m = int(10 * u)
+        if app.landscape:
+            tw = int(min(max(app.W * 0.34, 330 * u), app.W * 0.46))
+            canvas = R(m, m, app.W - tw - 3 * m, app.H - 2 * m)
+            panel = R(canvas.right + m, m, tw, app.H - 2 * m)
+        else:
+            th = int(min(max(app.H * 0.42, 380 * u), app.H * 0.55))
+            canvas = R(m, m, app.W - 2 * m, app.H - th - 3 * m)
+            panel = R(m, canvas.bottom + m, app.W - 2 * m, th)
+        return canvas, panel
+
+    def scene_editor(self, dt):
+        app = self.app
+        ui = app.ui
+        u = ui.u
+        surf = app.screen
+        ed = self.ed
+        if ed is None:
+            app.go('maps')
+            return
+        canvas, panel = self.layout()
+        if self.canvas is None or self.canvas.size != canvas.size or self.canvas.topleft != canvas.topleft:
+            self.canvas = canvas
+            self.cv_key = None
+            if self.view is None:
+                self.fit()
+        if self.view is None:
+            self.fit()
+        surf.fill((10, 14, 28))
+        self.blocks = []
+        # --- 화면 확대/축소 버튼 (캔버스 오른쪽 위)
+        zb = int(46 * u)
+        zr = [R(canvas.right - zb - 8 * u, canvas.y + 8 * u + i * (zb + 6 * u), zb, zb) for i in range(3)]
+        self.blocks = list(zr)
+        # --- 손가락 동작 처리 (그리기/옮기기/화면 이동/확대)
+        self.handle_gestures()
+        self.draw_canvas(surf)
+        for i, (lab, fn) in enumerate((('+', lambda: self.zoom(1.4)), ('-', lambda: self.zoom(1 / 1.4)), (T('전체', 'Fit'), self.fit))):
+            if ui.button(surf, zr[i], lab, 'ghost', size=zb * (0.5 if i < 2 else 0.32)):
+                fn()
+        # 위쪽 정보줄
+        d = ed.data
+        tr = ed.preview()
+        info = d['name'] + ('  *' if ed.dirty else '')
+        ui.text(surf, info, canvas.x + 12 * u, canvas.y + 8 * u, 26 * u, (255, 255, 255))
+        if tr is not None:
+            ui.text(surf, T('%.2f km · 폭 %dm · 조절점 %d · 물건 %d' % (tr.length / 1000.0, d['width'], len(d['pts']), len(d['objs'])),
+                            '%.2f km · width %dm · %d points · %d objects' % (tr.length / 1000.0, d['width'], len(d['pts']), len(d['objs']))),
+                    canvas.x + 12 * u, canvas.y + 40 * u, 17 * u, (200, 215, 245))
+        warns = ed.warnings(LANG) if self.g is None else []
+        wy = canvas.y + 64 * u
+        for wtxt in warns[:2]:
+            ui.text(surf, '! ' + wtxt, canvas.x + 12 * u, wy, 17 * u, (255, 150, 110))
+            wy += 22 * u
+        hint = self.current_hint()
+        if self.msg and time.time() < self.msg_t:
+            hint = self.msg
+        if hint:
+            ui.text(surf, hint, canvas.x + 12 * u, canvas.bottom - 30 * u, 17 * u, (255, 230, 150))
+        self.draw_panel(surf, panel)
+        self.handle_taps()
+        if self.confirm is not None and self.confirm[0] in ('exit', 'clear'):
+            self.draw_confirm(surf)
+
+    def current_hint(self):
+        if self.tab == 'set':
+            return ''
+        if self.tab == 'road':
+            k = self.tool
+        elif self.erase:
+            k = 'erase'
+        else:
+            k = 'line' if self.line else 'place'
+        h = ED_HINT.get(k)
+        return T(h[0], h[1]) if h else ''
+
+    # ---- 캔버스 그리기 ---------------------------------------------------------------
+    def draw_canvas(self, surf):
+        cv = self.canvas
+        key = (self.ver, tuple(round(v, 4) for v in self.view), cv.size)
+        if key != self.cv_key or self.cv_surf is None:
+            self.cv_key = key
+            self.cv_surf = self.render_canvas()
+        surf.blit(self.cv_surf, cv.topleft)
+        # 진행 중인 선 / 옮기는 점
+        u = self.app.ui.u
+        if self.stroke and len(self.stroke) > 1:
+            pts = [self.to_screen(x, z) for x, z in self.stroke]
+            col = (255, 230, 90) if self.tab == 'road' else OBJ_INFO[self.kinds.get(self.tab, 'cone')]['col']
+            pygame.draw.lines(surf, (0, 0, 0), False, pts, max(3, int(7 * u)))
+            pygame.draw.lines(surf, col, False, pts, max(2, int(4 * u)))
+        if self.drag_pt >= 0:
+            pts = [self.to_screen(p[0], p[1]) for p in self.ed.data['pts']]
+            pygame.draw.lines(surf, (255, 230, 90), True, pts, max(1, int(2 * u)))
+            p = pts[self.drag_pt]
+            pygame.draw.circle(surf, (255, 230, 90), (int(p[0]), int(p[1])), int(12 * u), max(2, int(3 * u)))
+        pygame.draw.rect(surf, (90, 110, 170), cv, max(1, int(2 * u)))
+
+    def render_canvas(self):
+        cv = self.canvas
+        u = self.app.ui.u
+        s = pygame.Surface(cv.size)
+        d = self.ed.data
+        th = biome(d['look'])
+        g0 = hex_rgb(th['ground'][0])
+        bgc = shade_rgb(g0, 0.42)
+        s.fill(bgc)
+        ox, oy = cv.x, cv.y
+        sc = self.view[2]
+
+        def P(x, z):
+            sx, sy = self.to_screen(x, z)
+            return (sx - ox, sy - oy)
+        # 격자 (50m / 확대가 작으면 200m)
+        step = 50.0 if sc > 0.5 else 200.0
+        gc = shade_rgb(g0, 0.52)
+        x0w, z0w = self.to_world(cv.x, cv.y)
+        x1w, z1w = self.to_world(cv.right, cv.bottom)
+        gx = math.floor(x0w / step) * step
+        while gx <= x1w:
+            a = P(gx, 0)[0]
+            pygame.draw.line(s, gc, (a, 0), (a, cv.h))
+            gx += step
+        gz = math.floor(z0w / step) * step
+        while gz <= z1w:
+            b = P(0, gz)[1]
+            pygame.draw.line(s, gc, (0, b), (cv.w, b))
+            gz += step
+        W = CMAP_WORLD
+        pygame.draw.rect(s, (200, 80, 80), pygame.Rect(P(-W, -W), (2 * W * sc, 2 * W * sc)), max(1, int(2 * u)))
+        tr = self.ed.preview()
+        if tr is not None:
+            N = tr.N
+            stp = 1 if sc > 1.2 else 2
+            idxs = list(range(0, N, stp)) + [0]
+            sh = tr.hw + tr.SH
+            road = shade_rgb(hex_rgb(th['road']), 1.5)
+            grass = shade_rgb(g0, 0.8)
+            wallc = hex_rgb(th['wall'][0])
+
+            def edge(i, off):
+                return P(tr.px[i] + tr.rx[i] * off, tr.pz[i] + tr.rz[i] * off)
+            L1 = [edge(i, -sh) for i in idxs]
+            R1 = [edge(i, sh) for i in idxs]
+            L0 = [edge(i, -tr.hw) for i in idxs]
+            R0 = [edge(i, tr.hw) for i in idxs]
+            for k in range(len(idxs) - 1):
+                pygame.draw.polygon(s, grass, (L1[k], L1[k + 1], R1[k + 1], R1[k]))
+            for k in range(len(idxs) - 1):
+                pygame.draw.polygon(s, road, (L0[k], L0[k + 1], R0[k + 1], R0[k]))
+            lw = max(1, int(2 * u))
+            pygame.draw.lines(s, wallc, False, L1, lw)
+            pygame.draw.lines(s, wallc, False, R1, lw)
+            # 높이 표시: 색이 밝을수록 높음 (가운데 선)
+            if tr.max_y - tr.min_y > 1.0:
+                cl = [P(tr.px[i], tr.pz[i]) for i in idxs]
+                for k in range(len(idxs) - 1):
+                    f = (tr.py[idxs[k]] - tr.min_y) / (tr.max_y - tr.min_y)
+                    pygame.draw.line(s, mix_rgb((70, 90, 160), (255, 240, 160), f), cl[k], cl[k + 1], max(1, int(2 * u)))
+            # 출발선 (체크무늬) + 방향 화살표
+            a, b = edge(0, -tr.hw), edge(0, tr.hw)
+            for k in range(8):
+                p0 = (a[0] + (b[0] - a[0]) * k / 8.0, a[1] + (b[1] - a[1]) * k / 8.0)
+                p1 = (a[0] + (b[0] - a[0]) * (k + 1) / 8.0, a[1] + (b[1] - a[1]) * (k + 1) / 8.0)
+                pygame.draw.line(s, (255, 255, 255) if k % 2 == 0 else (20, 20, 20), p0, p1, max(3, int(5 * u)))
+            j = min(N - 1, int(18 / tr.ds) + 1)
+            c0 = P(tr.px[0], tr.pz[0])
+            c1 = P(tr.px[j], tr.pz[j])
+            ang = math.atan2(c1[1] - c0[1], c1[0] - c0[0])
+            L = max(16 * u, min(60 * u, tr.width * sc * 1.2))
+            tip = (c0[0] + math.cos(ang) * L, c0[1] + math.sin(ang) * L)
+            pygame.draw.line(s, (255, 220, 60), c0, tip, max(2, int(4 * u)))
+            for da in (2.6, -2.6):
+                pygame.draw.line(s, (255, 220, 60), tip, (tip[0] + math.cos(ang + da) * 12 * u, tip[1] + math.sin(ang + da) * 12 * u), max(2, int(4 * u)))
+        # 물건
+        for o in d['objs']:
+            info = OBJ_INFO[o[0]]
+            p = P(o[1], o[2])
+            if p[0] < -60 or p[1] < -60 or p[0] > cv.w + 60 or p[1] > cv.h + 60:
+                continue
+            col = info['col']
+            cat = info['cat']
+            if cat == 'road':
+                hl = (4.5 if o[0] == 'pad' else 3.3) * o[3] * sc
+                hwp = 2.8 * o[3] * sc
+                if o[0] == 'box':
+                    hl, hwp = 1.2 * sc, (tr.hw if tr is not None else 8.0) * sc
+                hl, hwp = max(hl, 4 * u), max(hwp, 3 * u)
+                ca, sa = math.cos(o[4]), math.sin(o[4])
+                # rot = 길 방향(atan2(tx, tz)) -> 화면 (x 오른쪽, z 아래)
+                fx_, fz_ = sa, ca
+                rx_, rz_ = -fz_, fx_
+                pts = [(p[0] + fx_ * a_ * hl + rx_ * b_ * hwp, p[1] + fz_ * a_ * hl + rz_ * b_ * hwp) for (a_, b_) in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+                pygame.draw.polygon(s, col, pts)
+                pygame.draw.polygon(s, (0, 0, 0), pts, 1)
+                if o[0] == 'box':
+                    for k in range(4):
+                        t_ = -0.66 + 0.44 * k
+                        q_ = (p[0] + rx_ * t_ * hwp, p[1] + rz_ * t_ * hwp)
+                        pygame.draw.rect(s, (255, 255, 255), (int(q_[0] - 3 * u), int(q_[1] - 3 * u), int(6 * u) + 1, int(6 * u) + 1))
+                continue
+            rad = info['rad'] * o[3]
+            if o[0] == 'building':
+                rad = (14 + clamp((o[3] - 0.3) / 2.7, 0.0, 1.0) * 22) * 0.45
+            pr = max(4 * u, rad * sc) if cat == 'obs' else max(4.5 * u, min(rad * sc * 2.2, 40 * u))
+            if o[0] == 'volcano' or o[0] == 'building':
+                pr = max(5 * u, rad * sc)
+            ip = (int(p[0]), int(p[1]))
+            if cat == 'obs':
+                if o[0] in ('block', 'crate', 'tires'):
+                    ca, sa = math.cos(o[4]), math.sin(o[4])
+                    hl = pr * (1.8 if o[0] == 'block' else 1.0)
+                    pts = [(p[0] + sa * a_ * hl + (-ca) * b_ * pr * 0.7, p[1] + ca * a_ * hl + sa * b_ * pr * 0.7)
+                           for (a_, b_) in ((-1, -1), (1, -1), (1, 1), (-1, 1))]
+                    pygame.draw.polygon(s, col, pts)
+                    pygame.draw.polygon(s, (0, 0, 0), pts, 1)
+                else:
+                    pygame.draw.circle(s, (0, 0, 0), ip, int(pr) + 1)
+                    pygame.draw.circle(s, col, ip, int(pr))
+                    if o[0] == 'lavapillar':
+                        pygame.draw.circle(s, (255, 220, 120), ip, max(1, int(pr * 0.45)))
+            else:
+                pygame.draw.circle(s, shade_rgb(col, 0.55), (ip[0] + 1, ip[1] + 1), int(pr))
+                pygame.draw.circle(s, col, ip, int(pr))
+                if o[0] == 'volcano':
+                    pygame.draw.circle(s, (255, 120, 30), ip, max(2, int(pr * 0.3)))
+        # 조절점
+        pts = d['pts']
+        big = self.tab == 'road' and self.tool not in ('draw', 'pan')
+        pr = int((7 if big else 4) * u)
+        for i, p in enumerate(pts):
+            q_ = P(p[0], p[1])
+            ip = (int(q_[0]), int(q_[1]))
+            c = (255, 255, 255)
+            if p[2] > 0.5:
+                c = (255, 200, 90)
+            elif p[2] < -0.5:
+                c = (120, 170, 255)
+            if i == 0:
+                pygame.draw.circle(s, (0, 0, 0), ip, pr + int(4 * u))
+                pygame.draw.circle(s, (80, 255, 120), ip, pr + int(3 * u))
+            pygame.draw.circle(s, (0, 0, 0), ip, pr + 1)
+            pygame.draw.circle(s, c, ip, pr)
+            if big and abs(p[2]) > 0.5:
+                self.app.ui.text(s, '%+d' % int(round(p[2])), ip[0] + pr + 2, ip[1] - pr - 14 * u, 14 * u, c)
+        return s
+
+    # ---- 손가락/마우스 동작 --------------------------------------------------------------
+    def pointers(self):
+        ptr = self.app.ptr
+        if ptr.fingers:
+            return list(ptr.fingers.items())
+        if ptr.mouse is not None:
+            return [('m', ptr.mouse)]
+        return []
+
+    def handle_gestures(self):
+        cv = self.canvas
+        if self.app.kb is not None or self.confirm is not None:
+            self.g = None
+            return
+        if self.wheel:
+            mp = pygame.mouse.get_pos()
+            if cv.collidepoint(mp):
+                self.zoom(1.18 ** self.wheel, mp[0], mp[1])
+            self.wheel = 0.0
+        self.block_taps = False
+        pts = self.pointers()
+        ids = dict(pts)
+        g = self.g
+        if g is None:
+            inside = [(i, p) for i, p in pts if cv.collidepoint(p) and not any(b.collidepoint(p) for b in self.blocks)]
+            if len(pts) == 1 and len(inside) == 1:
+                i, p = inside[0]
+                self.g = {'mode': 'one', 'id': i, 'start': p, 'last': p, 'moved': False}
+                self.begin(p)
+            elif len(inside) >= 2:
+                self.g = self.two_start(inside[:2])
+            return
+        if g['mode'] == 'one':
+            if len(pts) >= 2:
+                self.cancel()
+                inside = [(i, p) for i, p in pts if cv.collidepoint(p)]
+                self.g = self.two_start(inside[:2]) if len(inside) >= 2 else {'mode': 'wait'}
+                return
+            p = ids.get(g['id'])
+            if p is None:
+                self.end(g['last'], g['moved'])
+                if g['moved']:
+                    self.block_taps = True
+                self.g = None
+                return
+            if not g['moved'] and math.hypot(p[0] - g['start'][0], p[1] - g['start'][1]) > 10 * self.app.ui.u:
+                g['moved'] = True
+            if p != g['last']:
+                self.drag(g['last'], p, g['moved'])
+                g['last'] = p
+        elif g['mode'] == 'two':
+            a, b = ids.get(g['a']), ids.get(g['b'])
+            if a is None or b is None:
+                self.g = {'mode': 'wait'}
+                self.block_taps = True
+                return
+            c = ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0)
+            dist = max(10.0, math.hypot(a[0] - b[0], a[1] - b[1]))
+            self.pan(c[0] - g['c'][0], c[1] - g['c'][1])
+            self.zoom(dist / g['d'], c[0], c[1])
+            g['c'], g['d'] = c, dist
+        else:      # 'wait': 손가락을 모두 뗄 때까지 아무것도 안 함
+            self.block_taps = True
+            if not pts:
+                self.g = None
+
+    def two_start(self, two):
+        (ia, a), (ib, b) = two
+        return {'mode': 'two', 'a': ia, 'b': ib, 'c': ((a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0), 'd': max(10.0, math.hypot(a[0] - b[0], a[1] - b[1]))}
+
+    def mode_of(self):
+        """현재 도구의 손가락 동작 종류: 'stroke' (선 그리기) / 'point' (점 끌기) / 'erase' / 'pan' / 'tap'"""
+        if self.tab == 'road':
+            return {'draw': 'stroke', 'move': 'point', 'pan': 'pan'}.get(self.tool, 'tap')
+        if self.tab == 'set':
+            return 'pan'
+        if self.erase:
+            return 'erase'
+        return 'stroke' if self.line else 'tap'
+
+    def begin(self, p):
+        m = self.mode_of()
+        wx, wz = self.to_world(*p)
+        self.stroke = None
+        self.drag_pt = -1
+        if m == 'stroke':
+            self.stroke = [(wx, wz)]
+        elif m == 'point':
+            i = self.ed.nearest_point(wx, wz, self.hit_m())
+            if i >= 0:
+                self.ed.snapshot()
+                self.drag_pt = i
+        elif m == 'erase':
+            if self.ed.erase_at(wx, wz, self.hit_m() * 0.7):
+                self.changed()
+
+    def drag(self, a, b, moved):
+        m = self.mode_of()
+        wx, wz = self.to_world(*b)
+        if m == 'stroke' and self.stroke is not None:
+            lx, lz = self.stroke[-1]
+            if math.hypot(wx - lx, wz - lz) * self.view[2] > 3:
+                self.stroke.append((wx, wz))
+        elif m == 'point' and self.drag_pt >= 0:
+            self.ed.move_point(self.drag_pt, wx, wz, snap=False)
+        elif m == 'erase':
+            ed = self.ed
+            objs = ed.data['objs']
+            rad = self.hit_m() * 0.7
+            keep = [o for o in objs if (o[1] - wx) ** 2 + (o[2] - wz) ** 2 >= (rad + OBJ_INFO[o[0]]['rad'] * o[3] * 0.5) ** 2]
+            if len(keep) != len(objs):
+                ed.data['objs'] = keep
+                ed.dirty = True
+                self.changed()
+        elif moved:
+            self.pan(b[0] - a[0], b[1] - a[1])
+
+    def end(self, p, moved):
+        m = self.mode_of()
+        ed = self.ed
+        if m == 'stroke' and self.stroke is not None:
+            st = self.stroke
+            self.stroke = None
+            if self.tab == 'road':
+                if len(st) > 4:
+                    if ed.set_stroke(st):
+                        self.changed()
+                        self.say('길을 만들었어요! 점을 옮겨서 다듬을 수 있어요', 'Road created! Move points to fine-tune it')
+                    else:
+                        self.say('너무 짧아요. 화면을 크게 써서 한 바퀴 그려 주세요', 'Too short - draw a bigger loop')
+            else:
+                kind = self.kinds[self.tab]
+                if len(st) < 2 or not moved:
+                    if ed.add_obj(kind, st[-1][0], st[-1][1], OBJ_INFO[kind]['s'] * self.size):
+                        self.changed()
+                else:
+                    n = ed.add_line(kind, st, OBJ_INFO[kind]['s'] * self.size)
+                    if n:
+                        self.changed()
+                        self.say('%d개 놓았어요' % n, 'Placed %d' % n, 1.4)
+                if ed.msg == 'full':
+                    self.say('물건이 너무 많아요 (최대 %d개)' % CMAP_MAX_OBJS, 'Too many objects (max %d)' % CMAP_MAX_OBJS)
+                    ed.msg = ''
+        elif m == 'point' and self.drag_pt >= 0:
+            self.drag_pt = -1
+            self.changed()
+
+    def cancel(self):
+        self.stroke = None
+        if self.drag_pt >= 0:
+            self.drag_pt = -1
+            self.changed()
+
+    def handle_taps(self):
+        """캔버스를 짧게 누른 경우 (점 추가/삭제/높이/출발점/물건 하나 놓기)"""
+        ui = self.app.ui
+        cv = self.canvas
+        taps = [t for t in ui.taps if cv.collidepoint(t) and not any(b.collidepoint(t) for b in self.blocks)]
+        for t in taps:
+            ui.taps.remove(t)
+        if not taps or self.block_taps or self.confirm is not None:
+            return
+        m = self.mode_of()
+        ed = self.ed
+        for t in taps:
+            wx, wz = self.to_world(*t)
+            if self.tab == 'road':
+                tool = self.tool
+                if tool == 'add':
+                    if ed.insert_point(wx, wz) >= 0:
+                        self.changed()
+                    continue
+                i = ed.nearest_point(wx, wz, self.hit_m())
+                if i < 0:
+                    if tool in ('del', 'up', 'down', 'start'):
+                        self.say('점(동그라미)을 눌러 주세요', 'Tap on a point (circle)', 1.4)
+                    continue
+                if tool == 'del':
+                    if ed.delete_point(i):
+                        self.changed()
+                    else:
+                        self.say('점이 4개보다 적을 수는 없어요', 'Need at least 4 points')
+                elif tool in ('up', 'down'):
+                    ed.raise_point(i, 4.0 if tool == 'up' else -4.0)
+                    self.changed()
+                elif tool == 'start':
+                    ed.set_start(i)
+                    self.changed()
+                    self.say('출발선을 옮겼어요', 'Start line moved', 1.4)
+            elif m == 'tap' and self.tab in ('obs', 'deco', 'pad'):
+                kind = self.kinds[self.tab]
+                if ed.add_obj(kind, wx, wz, OBJ_INFO[kind]['s'] * self.size):
+                    self.changed()
+                elif ed.msg == 'full':
+                    self.say('물건이 너무 많아요 (최대 %d개)' % CMAP_MAX_OBJS, 'Too many objects (max %d)' % CMAP_MAX_OBJS)
+                    ed.msg = ''
+            elif m == 'erase':
+                if ed.erase_at(wx, wz, self.hit_m() * 0.7):
+                    self.changed()
+
+    # ---- 오른쪽(아래) 도구판 -----------------------------------------------------------------
+    def draw_panel(self, surf, r):
+        app = self.app
+        ui = app.ui
+        u = ui.u
+        ui.panel(surf, r, 225)
+        pad = int(10 * u)
+        x, y, w = r.x + pad, r.y + pad, r.w - 2 * pad
+        # 탭
+        th_ = int(min(44 * u, r.h * 0.1))
+        tw = (w - 4 * 4 * u) / 5.0
+        for i, (key, ko, en) in enumerate(ED_TABS):
+            if ui.button(surf, R(x + i * (tw + 4 * u), y, tw, th_), T(ko, en), 'chipon' if self.tab == key else 'chip', size=th_ * 0.4):
+                self.tab = key
+                self.erase = False
+                self.changed()
+        y += th_ + 8 * u
+        # 아래쪽 공통 버튼
+        bh = int(min(50 * u, r.h * 0.11))
+        by = r.bottom - pad - bh
+        q = (w - 3 * 6 * u) / 4.0
+        if ui.button(surf, R(x, by, q, bh), T('되돌리기', 'Undo'), 'normal', size=bh * 0.36, enabled=bool(self.ed.undo_stack)):
+            if self.ed.undo():
+                self.changed()
+        if ui.button(surf, R(x + q + 6 * u, by, q, bh), T('저장', 'Save'), 'good', size=bh * 0.4):
+            self.save()
+        if ui.button(surf, R(x + 2 * (q + 6 * u), by, q, bh), T('시험 주행', 'Test drive'), 'primary', size=bh * 0.36):
+            self.test_drive()
+            return
+        if ui.button(surf, R(x + 3 * (q + 6 * u), by, q, bh), T('나가기', 'Exit'), 'ghost', size=bh * 0.38):
+            self.try_exit()
+        area = R(x, y, w, by - 8 * u - y)
+        if self.tab == 'road':
+            self.panel_road(surf, area)
+        elif self.tab in ('obs', 'deco', 'pad'):
+            self.panel_objs(surf, area)
+        else:
+            self.panel_settings(surf, area)
+
+    def grid(self, area, n, cols, rows_max=None, gap=None):
+        u = self.app.ui.u
+        gap = 6 * u if gap is None else gap
+        rows = (n + cols - 1) // cols
+        if rows_max:
+            rows = min(rows, rows_max)
+        bw = (area.w - (cols - 1) * gap) / float(cols)
+        bh = min(52 * u, (area.h - (rows - 1) * gap) / float(max(1, rows)))
+        return [R(area.x + (i % cols) * (bw + gap), area.y + (i // cols) * (bh + gap), bw, bh) for i in range(n)], bh
+
+    def panel_road(self, surf, area):
+        ui = self.app.ui
+        u = ui.u
+        top = R(area.x, area.y, area.w, area.h * 0.62)
+        rects, bh = self.grid(top, len(ED_ROAD_TOOLS), 2)
+        for (key, ko, en), rr in zip(ED_ROAD_TOOLS, rects):
+            if ui.button(surf, rr, T(ko, en), 'chipon' if self.tool == key else 'chip', size=bh * 0.38):
+                self.tool = key
+                self.changed()
+        y = rects[-1].bottom + 10 * u
+        half = (area.w - 8 * u) / 2.0
+        h2 = min(46 * u, (area.bottom - y - 8 * u) / 2.0)
+        if h2 < 24 * u:
+            return
+        if ui.button(surf, R(area.x, y, half, h2), T('방향 반대로', 'Reverse direction'), 'normal', size=h2 * 0.38):
+            self.ed.reverse()
+            self.changed()
+            self.say('달리는 방향을 바꿨어요', 'Direction reversed', 1.4)
+        if ui.button(surf, R(area.x + half + 8 * u, y, half, h2), T('전체 옮기기 ↻', 'Recenter'), 'normal', size=h2 * 0.38):
+            d = self.ed.data
+            xs = [p[0] for p in d['pts']]
+            zs = [p[1] for p in d['pts']]
+            self.ed.move_all(-(min(xs) + max(xs)) / 2.0, -(min(zs) + max(zs)) / 2.0)
+            self.changed()
+            self.fit()
+        y += h2 + 8 * u
+        if ui.button(surf, R(area.x, y, area.w, h2), T('도로 폭 %dm  (설정 탭에서 더 많은 조절)' % self.ed.data['width'], 'Road width %dm (more in Settings)' % self.ed.data['width']),
+                     'ghost', size=h2 * 0.34):
+            self.tab = 'set'
+
+    def panel_objs(self, surf, area):
+        ui = self.app.ui
+        u = ui.u
+        cat = self.tab
+        kinds = OBJ_BY_CAT['obs' if cat == 'obs' else ('deco' if cat == 'deco' else 'road')]
+        cols = 3 if cat != 'pad' else 2
+        # 아래: [한 개|줄] [크기 -/+] [지우개]
+        ctrl_h = min(44 * u, area.h * 0.13)
+        cy = area.bottom - ctrl_h * 2 - 6 * u
+        grid_area = R(area.x, area.y, area.w, cy - 8 * u - area.y)
+        per_page = len(kinds)
+        maxrows = max(1, int((grid_area.h + 6 * u) // (40 * u + 6 * u)))
+        if (len(kinds) + cols - 1) // cols > maxrows:
+            per_page = maxrows * cols - 2
+        npg = max(1, (len(kinds) + per_page - 1) // per_page)
+        self.deco_page = int(clamp(self.deco_page, 0, npg - 1))
+        shown = kinds[self.deco_page * per_page:(self.deco_page + 1) * per_page]
+        n_btn = len(shown) + (2 if npg > 1 else 0)
+        rects, bh = self.grid(grid_area, n_btn, cols)
+        cur = self.kinds[cat]
+        for k, rr in zip(shown, rects):
+            on = (k == cur and not self.erase)
+            if ui.button(surf, rr, obj_name(k, LANG), 'chipon' if on else 'chip', size=bh * 0.34):
+                self.kinds[cat] = k
+                self.erase = False
+            sw_ = max(6, int(bh * 0.22))
+            pygame.draw.rect(surf, OBJ_INFO[k]['col'], (rr.x + 5, rr.y + 5, sw_, sw_))
+        if npg > 1:
+            if ui.button(surf, rects[-2], '<', 'normal', size=bh * 0.4, enabled=self.deco_page > 0):
+                self.deco_page -= 1
+            if ui.button(surf, rects[-1], '>  %d/%d' % (self.deco_page + 1, npg), 'normal', size=bh * 0.36, enabled=self.deco_page < npg - 1):
+                self.deco_page += 1
+        third = (area.w - 12 * u) / 3.0
+        if ui.button(surf, R(area.x, cy, third, ctrl_h), T('한 개씩', 'Single'), 'chipon' if not self.line and not self.erase else 'chip', size=ctrl_h * 0.36):
+            self.line = False
+            self.erase = False
+        if ui.button(surf, R(area.x + third + 6 * u, cy, third, ctrl_h), T('줄로 놓기', 'Draw a row'), 'chipon' if self.line and not self.erase else 'chip', size=ctrl_h * 0.36):
+            self.line = True
+            self.erase = False
+        if ui.button(surf, R(area.x + 2 * (third + 6 * u), cy, third, ctrl_h), T('지우개', 'Eraser'), 'danger' if self.erase else 'chip', size=ctrl_h * 0.36):
+            self.erase = not self.erase
+        y2 = cy + ctrl_h + 6 * u
+        d_ = self.stepper(surf, R(area.x, y2, area.w, ctrl_h), T('크기', 'Size'), '%d%%' % int(round(self.size * 100)))
+        if d_:
+            self.size = round(clamp(self.size + d_ * 0.1, 0.4, 3.0), 2)
+
+    def panel_settings(self, surf, area):
+        app = self.app
+        ui = app.ui
+        u = ui.u
+        ed = self.ed
+        d = ed.data
+        npg = 2
+        rh = min(44 * u, (area.h - 50 * u) / 6.0)
+        y = area.y
+        if self.set_page == 0:
+            if ui.button(surf, R(area.x, y, area.w, rh), T('이름: ', 'Name: ') + d['name'], 'normal', size=rh * 0.4):
+                def setname(t):
+                    t = t.strip()
+                    if t:
+                        ed.set('name', t)
+                        self.changed()
+                app.open_kb(T('맵 이름', 'Map name'), d['name'], 'text', 20, setname)
+            y += rh + 6 * u
+            fam, ti, mi = biome_parts(d['look'])
+            fname, tname, mname = biome_part_names(d['look'], LANG)
+            for label, val, fn in ((T('바이옴', 'Biome'), fname, lambda k: biome_map(fam + k, ti, mi)),
+                                   (T('시간대', 'Time'), tname, lambda k: biome_map(fam, ti + k, mi)),
+                                   (T('색감', 'Mood'), mname, lambda k: biome_map(fam, ti, mi + k))):
+                k = self.stepper(surf, R(area.x, y, area.w, rh), label, val)
+                if k:
+                    ed.set('look', fn(k))
+                    self.changed()
+                y += rh + 6 * u
+            wl = CMAP_WEATHERS
+            k = self.stepper(surf, R(area.x, y, area.w, rh), T('날씨', 'Weather'), (CMAP_WEATHER_KO if LANG == 'ko' else CMAP_WEATHER_EN)[d['weather']])
+            if k:
+                ed.set('weather', wl[(wl.index(d['weather']) + k) % len(wl)])
+                self.changed()
+            y += rh + 6 * u
+            k = self.stepper(surf, R(area.x, y, area.w, rh), T('자동 장식', 'Auto scenery'), (CMAP_DECO_KO if LANG == 'ko' else CMAP_DECO_EN)[d['deco']])
+            if k and 0 <= d['deco'] + k <= 3:
+                ed.set('deco', d['deco'] + k)
+                self.changed()
+        else:
+            k = self.stepper(surf, R(area.x, y, area.w, rh), T('도로 폭', 'Road width'), '%dm' % d['width'])
+            if k:
+                ed.set('width', clamp(d['width'] + k * 2, 10, 30))
+                self.changed()
+            y += rh + 6 * u
+            k = self.stepper(surf, R(area.x, y, area.w, rh), T('언덕', 'Hills'), '%d%%' % int(round(d['hills'] * 100)))
+            if k:
+                ed.set('hills', round(clamp(d['hills'] + k * 0.1, 0.0, 1.0), 2))
+                self.changed()
+            y += rh + 6 * u
+            k = self.stepper(surf, R(area.x, y, area.w, rh), T('기본 바퀴 수', 'Default laps'), d['laps'])
+            if k and 1 <= d['laps'] + k <= 10:
+                ed.set('laps', d['laps'] + k)
+            y += rh + 6 * u
+            half = (area.w - 8 * u) / 2.0
+            if ui.button(surf, R(area.x, y, half, rh), T('자동 부스트 발판: ', 'Auto boost pads: ') + (T('켬', 'On') if d['pads'] else T('끔', 'Off')),
+                         'chipon' if d['pads'] else 'chip', size=rh * 0.34):
+                ed.set('pads', 0 if d['pads'] else 1)
+                self.changed()
+            if ui.button(surf, R(area.x + half + 8 * u, y, half, rh), T('물건 모두 지우기', 'Clear objects'), 'danger', size=rh * 0.34, enabled=bool(d['objs'])):
+                self.confirm = ('clear', None)
+            y += rh + 6 * u
+            k = self.stepper(surf, R(area.x, y, area.w * 0.62, rh), T('코스 가져오기', 'Copy course'), '#%d' % self.import_mid)
+            if k:
+                self.import_mid = ((self.import_mid - 1 + k) % MAP_COUNT) + 1
+            if ui.button(surf, R(area.x + area.w * 0.64, y, area.w * 0.36, rh), T('가져오기', 'Copy'), 'normal', size=rh * 0.36):
+                src = cmap_from_builtin(self.import_mid)
+                ed.snapshot()
+                ed.data['pts'] = src['pts']
+                ed.data['width'] = src['width']
+                self.changed()
+                self.fit()
+                self.say('기본 맵 #%d 의 코스 모양을 가져왔어요' % self.import_mid, 'Copied the course of map #%d' % self.import_mid)
+        py_ = area.bottom - 40 * u
+        if ui.button(surf, R(area.x, py_, 90 * u, 40 * u), '<', 'normal', enabled=self.set_page > 0):
+            self.set_page -= 1
+        ui.text(surf, '%d / %d' % (self.set_page + 1, npg), area.x + area.w / 2, py_ + 8 * u, 20 * u, (230, 235, 255), 'c')
+        if ui.button(surf, R(area.right - 90 * u, py_, 90 * u, 40 * u), '>', 'normal', enabled=self.set_page < npg - 1):
+            self.set_page += 1
+
+    def stepper(self, surf, rect, label, value):
+        """[라벨   < 값 >] - 값 글자가 길면 칸에 맞게 줄인다. 반환 -1/0/+1"""
+        ui = self.app.ui
+        u = ui.u
+        lw = rect.w * 0.36
+        ui.text(surf, label, rect.x, rect.centery - 11 * u, min(22 * u, rect.h * 0.48), (210, 220, 245))
+        bw = rect.h * 1.05
+        res = 0
+        lb = R(rect.x + lw, rect.y, bw, rect.h)
+        rb = R(rect.right - bw, rect.y, bw, rect.h)
+        if ui.button(surf, lb, '<', 'normal', size=rect.h * 0.5):
+            res = -1
+        if ui.button(surf, rb, '>', 'normal', size=rect.h * 0.5):
+            res = 1
+        room = rb.x - lb.right - 8 * u
+        size = min(24 * u, rect.h * 0.52)
+        tw = ui.render(str(value), size, (255, 220, 120)).get_width()
+        if tw > room:
+            size = size * room / float(tw)
+        ui.text(surf, str(value), (lb.right + rb.x) // 2, rect.centery - size * 0.55, size, (255, 220, 120), 'c')
+        return res
+
+    # ---- 확인 창 / 나가기 / 시험 주행 -------------------------------------------------------
+    def draw_confirm(self, surf):
+        app = self.app
+        ui = app.ui
+        u = ui.u
+        veil = pygame.Surface((app.W, app.H), pygame.SRCALPHA)
+        veil.fill((0, 0, 0, 160))
+        surf.blit(veil, (0, 0))
+        pw, ph = int(min(app.W * 0.86, 520 * u)), int(250 * u)
+        r = R((app.W - pw) // 2, (app.H - ph) // 2, pw, ph)
+        ui.panel(surf, r, 240)
+        kind = self.confirm[0]
+        bh = 54 * u
+        if kind == 'exit':
+            ui.text(surf, T('저장하지 않은 변경이 있어요', 'You have unsaved changes'), r.centerx, r.y + 22 * u, 26 * u, (255, 255, 255), 'c')
+            third = (r.w - 4 * 14 * u) / 3.0
+            if ui.button(surf, R(r.x + 14 * u, r.bottom - bh - 18 * u, third, bh), T('저장 후 나가기', 'Save & exit'), 'good', size=18 * u):
+                if self.save():
+                    self.confirm = None
+                    self.leave()
+            if ui.button(surf, R(r.x + 28 * u + third, r.bottom - bh - 18 * u, third, bh), T('그냥 나가기', 'Discard'), 'danger', size=18 * u):
+                self.confirm = None
+                self.leave()
+            if ui.button(surf, R(r.x + 42 * u + 2 * third, r.bottom - bh - 18 * u, third, bh), T('취소', 'Cancel'), 'ghost', size=18 * u):
+                self.confirm = None
+        else:
+            ui.text(surf, T('놓은 물건을 모두 지울까요?', 'Remove all placed objects?'), r.centerx, r.y + 22 * u, 26 * u, (255, 255, 255), 'c')
+            half = (r.w - 3 * 14 * u) / 2.0
+            if ui.button(surf, R(r.x + 14 * u, r.bottom - bh - 18 * u, half, bh), T('모두 지우기', 'Clear all'), 'danger', size=20 * u):
+                self.ed.clear_objs()
+                self.changed()
+                self.confirm = None
+            if ui.button(surf, R(r.x + 28 * u + half, r.bottom - bh - 18 * u, half, bh), T('취소', 'Cancel'), 'ghost', size=20 * u):
+                self.confirm = None
+        ui.taps[:] = []
+
+    def try_exit(self):
+        if self.ed is not None and self.ed.dirty:
+            self.confirm = ('exit', None)
+        else:
+            self.leave()
+
+    def leave(self):
+        self.ed = None
+        self.app.go('maps')
+
+    def test_drive(self):
+        d = self.ed.result()
+        if d is None:
+            self.say('맵을 만들 수 없어요', 'Cannot build this map')
+            return
+        app = self.app
+        p = app.profile
+        entries = solo_entries(p.display_name(), p['kart'], int(p['bots']))
+        app.test_map = d
+        app.start_race(d, int(d['laps']), entries, False, True, 3.0, p['mode'] == 'item')
+
+    def on_back(self):
+        if self.confirm is not None:
+            self.confirm = None
+        else:
+            self.try_exit()
 
 
 

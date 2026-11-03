@@ -325,3 +325,47 @@ def tex_pad():
                 col = (25, 230, 255)
             buf[o], buf[o + 1], buf[o + 2] = col
     return make_texture('pad', w, h, buf, 'RGB', False)
+
+
+def tex_jump():
+    """점프대: 노란 바탕 + 검은 사선 + 흰 화살표"""
+    w, h = 64, 128
+    buf = bytearray(w * h * 3)
+    for y in range(h):
+        for x in range(w):
+            o = (y * w + x) * 3
+            col = (250, 196, 28)
+            if y < 40 and ((x + y) // 10) % 2 == 0:
+                col = (30, 30, 34)
+            dy = y - 64
+            dx = abs(x - w / 2.0)
+            if (0 <= dy - dx * 0.9 <= 14 and dx < 26) or (dx < 7 and 70 <= y <= 112):
+                col = (255, 255, 255)
+            if x < 3 or x > w - 4 or y < 3 or y > h - 4:
+                col = (30, 30, 34)
+            buf[o], buf[o + 1], buf[o + 2] = col
+    return make_texture('jump', w, h, buf, 'RGB', False)
+
+
+def tex_oil():
+    """기름 웅덩이: 가장자리가 울퉁불퉁한 검은 얼룩 (밖은 투명)"""
+    w, h = 64, 64
+    buf = bytearray(w * h * 4)
+    for y in range(h):
+        for x in range(w):
+            o = (y * w + x) * 4
+            u, v = (x - 31.5) / 31.5, (y - 31.5) / 31.5
+            a = math.atan2(v, u)
+            r = math.hypot(u, v)
+            edge = 0.86 + 0.12 * math.sin(a * 3.0 + 1.0)
+            if r < edge:
+                col = (20, 14, 28)
+                if (u + 0.3) ** 2 / 0.09 + (v + 0.2) ** 2 / 0.04 < 1.0:
+                    col = (64, 52, 108)
+                elif (u - 0.3) ** 2 / 0.03 + (v - 0.3) ** 2 / 0.02 < 1.0:
+                    col = (40, 92, 96)
+                buf[o], buf[o + 1], buf[o + 2], buf[o + 3] = col[0], col[1], col[2], 235
+            else:
+                buf[o], buf[o + 1], buf[o + 2], buf[o + 3] = 0, 0, 0, 0
+    return make_texture('oil', w, h, buf, 'RGBA', False)
+

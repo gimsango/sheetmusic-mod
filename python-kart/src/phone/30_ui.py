@@ -231,27 +231,110 @@ class UI(object):
         return res
 
 
+# ---- 한글(두벌식) 조합 ----
+_HCHO = u'ㄱㄲㄴㄷㄸㄹㅁㅂㅃㅅㅆㅇㅈㅉㅊㅋㅌㅍㅎ'
+_HJUNG = u'ㅏㅐㅑㅒㅓㅔㅕㅖㅗㅘㅙㅚㅛㅜㅝㅞㅟㅠㅡㅢㅣ'
+_HJONG = u' ㄱㄲㄳㄴㄵㄶㄷㄹㄺㄻㄼㄽㄾㄿㅀㅁㅂㅄㅅㅆㅇㅈㅊㅋㅌㅍㅎ'
+_HJUNG_C = {(u'ㅗ', u'ㅏ'): u'ㅘ', (u'ㅗ', u'ㅐ'): u'ㅙ', (u'ㅗ', u'ㅣ'): u'ㅚ', (u'ㅜ', u'ㅓ'): u'ㅝ', (u'ㅜ', u'ㅔ'): u'ㅞ', (u'ㅜ', u'ㅣ'): u'ㅟ',
+            (u'ㅡ', u'ㅣ'): u'ㅢ'}
+_HJONG_C = {(u'ㄱ', u'ㅅ'): u'ㄳ', (u'ㄴ', u'ㅈ'): u'ㄵ', (u'ㄴ', u'ㅎ'): u'ㄶ', (u'ㄹ', u'ㄱ'): u'ㄺ', (u'ㄹ', u'ㅁ'): u'ㄻ', (u'ㄹ', u'ㅂ'): u'ㄼ',
+            (u'ㄹ', u'ㅅ'): u'ㄽ', (u'ㄹ', u'ㅌ'): u'ㄾ', (u'ㄹ', u'ㅍ'): u'ㄿ', (u'ㄹ', u'ㅎ'): u'ㅀ', (u'ㅂ', u'ㅅ'): u'ㅄ'}
+_HJONG_S = dict((v, k) for k, v in _HJONG_C.items())
+_HJUNG_S = dict((v, k) for k, v in _HJUNG_C.items())
+
+
+def _hsyl(cho, jung, jong=0):
+    return chr(0xAC00 + cho * 588 + jung * 28 + jong)
+
+
+def hangul_add(text, j):
+    """text 의 마지막 글자에 자모 j 를 두벌식 규칙으로 붙인다"""
+    last = text[-1:] if text else ''
+    vowel = j in _HJUNG
+    if last and 0xAC00 <= ord(last) <= 0xD7A3:
+        c = ord(last) - 0xAC00
+        cho, jung, jong = c // 588, (c % 588) // 28, c % 28
+        if not vowel:
+            if jong == 0:
+                if j in _HJONG[1:]:
+                    return text[:-1] + _hsyl(cho, jung, _HJONG.index(j))
+            else:
+                cj = _HJONG_C.get((_HJONG[jong], j))
+                if cj:
+                    return text[:-1] + _hsyl(cho, jung, _HJONG.index(cj))
+            return text + j
+        if jong == 0:
+            cj = _HJUNG_C.get((_HJUNG[jung], j))
+            if cj:
+                return text[:-1] + _hsyl(cho, _HJUNG.index(cj))
+            return text + j
+        jc = _HJONG[jong]
+        keep, move = _HJONG_S.get(jc, (None, jc))
+        if move in _HCHO:
+            prev = _hsyl(cho, jung, _HJONG.index(keep) if keep else 0)
+            return text[:-1] + prev + _hsyl(_HCHO.index(move), _HJUNG.index(j))
+        return text + j
+    if last and last in _HCHO and vowel:
+        return text[:-1] + _hsyl(_HCHO.index(last), _HJUNG.index(j))
+    if last and last in _HJUNG and vowel:
+        cj = _HJUNG_C.get((last, j))
+        if cj:
+            return text[:-1] + cj
+    return text + j
+
+
+def hangul_back(text):
+    """한 자모씩 지우기 (각 -> 가 -> ㄱ)"""
+    last = text[-1:] if text else ''
+    if last and 0xAC00 <= ord(last) <= 0xD7A3:
+        c = ord(last) - 0xAC00
+        cho, jung, jong = c // 588, (c % 588) // 28, c % 28
+        if jong:
+            sp = _HJONG_S.get(_HJONG[jong])
+            return text[:-1] + _hsyl(cho, jung, _HJONG.index(sp[0]) if sp else 0)
+        sp = _HJUNG_S.get(_HJUNG[jung])
+        if sp:
+            return text[:-1] + _hsyl(cho, _HJUNG.index(sp[0]))
+        return text[:-1] + _HCHO[cho]
+    return text[:-1]
+
+
 class OnScreenKeyboard(object):
-    """텍스트/IP 입력용 화면 키보드 (모바일 소프트 키보드가 불안정해서 직접 그린다)"""
+    """텍스트/IP 입력용 화면 키보드 (모바일 소프트 키보드가 불안정해서 직접 그린다). mode 'text' = 한글/영문 전환 가능"""
 
     def __init__(self, title, text, mode, maxlen, on_ok):
         self.title, self.text, self.mode, self.maxlen, self.on_ok = title, text, mode, maxlen, on_ok
         self.shift = False
         self.blink = 0.0
+        self.ko = mode == 'text'
 
     def rows(self):
         if self.mode == 'ip':
             return ['123', '456', '789', '.0:']
+        if self.mode == 'text' and self.ko:
+            if self.shift:
+                return ['1234567890', u'ㅃㅉㄸㄲㅆㅛㅕㅑㅒㅖ', u'ㅁㄴㅇㄹㅎㅗㅓㅏㅣ', u'ㅋㅌㅊㅍㅠㅜㅡ!?']
+            return ['1234567890', u'ㅂㅈㄷㄱㅅㅛㅕㅑㅐㅔ', u'ㅁㄴㅇㄹㅎㅗㅓㅏㅣ', u'ㅋㅌㅊㅍㅠㅜㅡ-.']
         rs = ['1234567890', 'qwertyuiop', 'asdfghjkl-', 'zxcvbnm_.']
         return [r.upper() if self.shift else r for r in rs]
 
     def key(self, ch):
+        if ch in _HCHO or ch in _HJUNG:
+            t = hangul_add(self.text, ch)
+            if len(t) <= self.maxlen:
+                self.text = t
+            if self.shift:
+                self.shift = False
+            return
         if len(self.text) < self.maxlen:
             self.text += ch
 
+    def backspace(self):
+        self.text = hangul_back(self.text) if self.mode == 'text' else self.text[:-1]
+
     def handle_key_event(self, e):
         if e.key == pygame.K_BACKSPACE:
-            self.text = self.text[:-1]
+            self.backspace()
         elif e.key in (pygame.K_RETURN, pygame.K_KP_ENTER):
             return 'ok'
         elif e.key == pygame.K_ESCAPE:
@@ -297,19 +380,29 @@ class OnScreenKeyboard(object):
         bw3 = (total_w - 3 * gx) // 4
         specs = []
         if self.mode != 'ip':
-            specs.append(('Aa', 'chipon' if self.shift else 'normal', 'shift'))
+            specs.append(('Aa' if not self.ko else u'쌍', 'chipon' if self.shift else 'normal', 'shift'))
         else:
             specs.append(('', 'ghost', None))
+        if self.mode == 'text':
+            specs.append((u'한/A', 'chipon' if self.ko else 'normal', 'lang'))
+            specs.append((u'띄움' if self.ko else 'Space', 'normal', 'space'))
         specs += [('<-', 'normal', 'bs'), (T('취소', 'Cancel'), 'ghost', 'cancel'), ('OK', 'primary', 'ok')]
+        bw3 = (total_w - (len(specs) - 1) * gx) // len(specs)
         for i, (lab, kind, act) in enumerate(specs):
             r = pygame.Rect(x0 + i * (bw3 + gx), by, bw3, kh)
             if act is None:
                 continue
-            if ui.button(surf, r, lab, kind, size=kh * 0.46):
+            if ui.button(surf, r, lab, kind, size=kh * 0.42):
                 if act == 'shift':
                     self.shift = not self.shift
+                elif act == 'lang':
+                    self.ko = not self.ko
+                    self.shift = False
+                elif act == 'space':
+                    if len(self.text) < self.maxlen:
+                        self.text += ' '
                 elif act == 'bs':
-                    self.text = self.text[:-1]
+                    self.backspace()
                 else:
                     res = act
         ui.taps[:] = []        # 키보드가 떠 있는 동안 다른 위젯이 탭을 받지 않게

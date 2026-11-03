@@ -104,7 +104,7 @@ def min_separation(poly, ds):
     return math.sqrt(best)
 
 
-def relax_corners(poly, max_ang=0.19, iters=60, spacing=4.0):
+def relax_corners(poly, max_ang=0.19, iters=60, spacing=4.0, min_n=220):
     n = len(poly)
     pts = [list(p) for p in poly]
     changed = False
@@ -137,7 +137,7 @@ def relax_corners(poly, max_ang=0.19, iters=60, spacing=4.0):
         pts = new
     if not changed:
         return poly
-    return resample_closed([tuple(p) for p in pts], spacing)
+    return resample_closed([tuple(p) for p in pts], spacing, min_n)
 
 
 class Q(object):
@@ -163,23 +163,34 @@ class Track(object):
     SH = 12.0   # 갓길(잔디) 폭 - 그 바깥이 벽
 
     def __init__(self, map_id, outline_only=False):
-        self.info = map_info(map_id)
-        self.theme = biome(map_id)
-        r = Rng(self.info['seed'])
-        self.width = 15.0 + int(r() * 5)
-        self.hw = self.width / 2.0
-        hw, SH = self.hw, self.SH
-        self.wall_off = hw + SH - 0.6
-        # (가로 오프셋, 높이 변화): 도로 -> 연석 -> 갓길 -> 비탈
-        self.rows = [(hw, 0.0), (hw + 0.7, -0.14), (hw + SH, -0.25), (hw + SH + 40.0, -2.5), (hw + SH + 200.0, -30.0)]
-        self._centerline(r)
+        """map_id: 기본 맵 번호(1~1000) 또는 '맵 만들기'로 만든 맵 데이터(dict)"""
         self.props = []
         self.props_by_seg = {}
         self.pads = []
         self.lamps = []
         self.arches = []
+        self.obstacles = []          # 길 위(벽 안쪽)에 놓인 단단한 물체 [(x, z, 반지름, 인덱스, 가로 오프셋)]
+        self.obs_near = {}           # 트랙 인덱스 -> 그 근처 장애물 목록 (충돌/봇 회피용)
+        self.box_rows = None         # 아이템 상자 줄 위치 (None = 자동)
+        self.custom = None
+        if isinstance(map_id, dict):
+            self._init_custom(map_id, outline_only)
+            return
+        self.info = map_info(map_id)
+        self.theme = biome(map_id)
+        r = Rng(self.info['seed'])
+        self._set_width(15.0 + int(r() * 5))
+        self._centerline(r)
         if not outline_only:
             self._decorate(r)
+
+    def _set_width(self, width):
+        self.width = width
+        self.hw = self.width / 2.0
+        hw, SH = self.hw, self.SH
+        self.wall_off = hw + SH - 0.6
+        # (가로 오프셋, 높이 변화): 도로 -> 연석 -> 갓길 -> 비탈
+        self.rows = [(hw, 0.0), (hw + 0.7, -0.14), (hw + SH, -0.25), (hw + SH + 40.0, -2.5), (hw + SH + 200.0, -30.0)]
 
     # ---- 중심선 -----------------------------------------------------------
     def _centerline(self, r):
@@ -232,6 +243,103 @@ class Track(object):
             if s < best_s:
                 best_s, best_i = s, i
         poly = poly[best_i:] + poly[:best_i]
+        self._setup_poly(poly)
+
+    # ---- 맵 만들기로 만든 맵 ------------------------------------------------------------
+    def _init_custom(self, data, outline_only):
+        d = cmap_clean(data) or cmap_new()
+        self.custom = d
+        seed = cmap_key(d)
+        th = cmap_theme(d)
+        self.theme = th
+        self.info = dict(id=0, seed=seed, theme=th['family'], variant=0, name=d['name'], name_en=d['name'],
+                         theme_name=th['name'], theme_en=th['en'], family_name=th['family_ko'], family_en=th['family_en'], custom=True)
+        r = Rng(seed)
+        self._set_width(float(d['width']))
+        pts = d['pts']
+        K = len(pts)
+        amp = 30.0 * d['hills']
+        ph = (r() * TAU, r() * TAU, r() * TAU)
+        cps = []
+        for i, p in enumerate(pts):
+            t = i / float(K)
+            y = p[2] + amp * (math.sin(TAU * t + ph[0]) * 0.6 + math.sin(2 * TAU * t + ph[1]) * 0.3 + math.sin(3 * TAU * t + ph[2]) * 0.18)
+            cps.append((p[0], y, p[1]))
+        poly = resample_closed(catmull_closed(cps, 24), 4.0, 60)
+        # 너무 급한 꺾임은 달릴 수 있게 둥글게 (그린 모양은 최대한 유지)
+        for _ in range(6):
+            if max_turn_angle(poly) <= 0.21:
+                break
+            poly = relax_corners(poly, min_n=60)
+        self._setup_poly(poly)
+        if outline_only:
+            return
+        if d['pads']:
+            self._auto_pads(r)
+        dk = CMAP_DECO_K[d['deco']]
+        if dk > 0:
+            self._auto_props(r, dk)
+        self._place_objs(d, seed)
+        self._finish_props()
+        if d['deco'] > 0:
+            self._theme_extras()
+
+    def _place_objs(self, d, seed):
+        """직접 놓은 물건: 장식물/장애물(충돌) / 부스트·점프·기름 발판 / 아이템 상자 줄"""
+        q = Q()
+        N = self.N
+        hw = self.hw
+        boxes = []
+        for n, o in enumerate(d['objs']):
+            kind, x, z, s, rot = o[0], o[1], o[2], o[3], o[4]
+            info = OBJ_INFO[kind]
+            self.query(x, z, -1, q)
+            idx = int(round(q.prog)) % N
+            dd = q.d
+            if info['cat'] == 'road':
+                if abs(dd) > hw + 1.5:
+                    continue                      # 길 밖의 발판/상자는 쓰지 않음
+                if kind == 'box':
+                    boxes.append(idx)
+                    continue
+                if kind == 'jump':
+                    hl, hwp = 3.2 * s, 3.4 * s
+                elif kind == 'oil':
+                    hl, hwp = 3.4 * s, 2.6 * s
+                else:
+                    hl, hwp = 4.5 * s, 2.8 * s
+                hwp = min(hwp, hw)
+                pad = dict(idx=idx, d=clamp(dd, -hw + hwp, hw - hwp), half_len=hl, half_w=hwp)
+                if kind != 'pad':
+                    pad['kind'] = kind
+                self.pads.append(pad)
+                continue
+            rr = Rng((seed ^ hash32(n * 7 + 3)) & 0xFFFFFFFF)
+            r1, r2, r3 = rr(), rr(), rr()
+            if kind == 'building':                # 빌딩은 크기 조절값으로 폭/높이를 정한다
+                k = clamp((s - 0.3) / 2.7, 0.0, 1.0)
+                r1 = r2 = k
+                r3 = math.sqrt(k)
+                rad = (14 + r1 * 22) * 0.45
+            else:
+                rad = info['rad'] * s
+            y = q.y if abs(dd) <= hw + 0.7 else q.y - 0.15
+            self.props.append(dict(kind=kind, x=x, y=y, z=z, rot=rot, s=s, r1=r1, r2=r2, r3=r3, seg=idx, user=True))
+            if rad > 0 and abs(dd) - rad < self.wall_off:
+                self.obstacles.append((x, z, rad, idx, dd))
+        if boxes:
+            rows = []
+            for i in sorted(set(boxes)):
+                if not rows or i - rows[-1] > 3:
+                    rows.append(i)
+            self.box_rows = rows
+        for ob in self.obstacles:
+            span = int(ob[2] / self.ds) + 4
+            for k in range(-span, span + 1):
+                self.obs_near.setdefault((ob[3] + k) % N, []).append(ob)
+
+    def _setup_poly(self, poly):
+        """재샘플된 닫힌 중심선(점 간격 약 4m) -> 방향/오른쪽 벡터/길이/뱅킹/커브 강도"""
         N = len(poly)
         self.N = N
         self.px = [p[0] for p in poly]
@@ -287,10 +395,13 @@ class Track(object):
 
     # ---- 장식물/패드 ---------------------------------------------------------
     def _decorate(self, r):
-        th = self.theme
+        self._auto_pads(r)
+        self._auto_props(r, 1.0)
+        self._finish_props()
+        self._theme_extras()
+
+    def _auto_pads(self, r):
         N = self.N
-        px, pz, py, rx, rz = self.px, self.pz, self.py, self.rx, self.rz
-        # 부스트 패드
         count = 6 + int(r() * 5)
         for k in range(count):
             idx = int(((k + 0.5 + (r() - 0.5) * 0.4) / count) * N)
@@ -298,7 +409,12 @@ class Track(object):
             if idx < 14 or idx > N - 8:
                 continue
             self.pads.append(dict(idx=idx, d=d, half_len=4.5, half_w=2.8))
-        # 장식물
+
+    def _auto_props(self, r, density):
+        """벽 바깥에 바이옴 장식물을 흩뿌린다 (density 1 = 기본 맵과 같은 양)"""
+        th = self.theme
+        N = self.N
+        px, pz, py, rx, rz = self.px, self.pz, self.py, self.rx, self.rz
         cell = 60.0
         grid = {}
         for i in range(0, N, 2):
@@ -319,7 +435,7 @@ class Track(object):
                                 return False
             return True
         total = sum(w for _, w in th['props'])
-        want = int(round(N * 2.1))
+        want = int(round(N * 2.1 * density))
         for _ in range(want):
             i = int(r() * N)
             side = 1 if r() < 0.5 else -1
@@ -340,8 +456,14 @@ class Track(object):
             s = 0.7 + r() * 0.9
             r1, r2, r3 = r(), r(), r()
             self.props.append(dict(kind=kind, x=x, y=y, z=z, rot=rot, s=s, r1=r1, r2=r2, r3=r3, seg=i))
+
+    def _finish_props(self):
         for p in self.props:
             self.props_by_seg.setdefault(p['seg'], []).append(p)
+
+    def _theme_extras(self):
+        th = self.theme
+        N = self.N
         if th.get('lamps'):
             k = 0
             for i in range(4, N, 7):

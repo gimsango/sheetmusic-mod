@@ -118,7 +118,7 @@ def draw_hud(app, surf, race, dt):
         app.mini = build_minimap(race.track, ms, None)
     mx, my = sw - ms - 12 * u, 10 * u
     draw_minimap(ui, surf, app.mini[0], app.mini[1], race, int(mx), int(my))
-    ui.text(surf, '#%d %s' % (race.map_id, race.track.info['name' if LANG == 'ko' else 'name_en']), sw - 14 * u, my + ms + 2 * u, 15 * u, (215, 225, 250), 'r')
+    ui.text(surf, map_title(race.map_id, LANG), sw - 14 * u, my + ms + 2 * u, 15 * u, (215, 225, 250), 'r')
     # 속도계
     kmh = int(sim.speed * 3.6)
     cx = int(sw * 0.70) if sw > sh else sw // 2 + int(sw * 0.18)

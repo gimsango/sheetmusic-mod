@@ -15,9 +15,11 @@ class Cam(object):
 
 
 QUALITY = [  # 내부 해상도 폭, near/mid/far 구간(샘플), 카트 LOD 거리(m)
+    # 낮음/중간: 멀리 있는 길은 2칸·4칸씩 건너뛰어 그리고, 먼 카트는 단순한 모양/점으로 (디테일을 낮춰서 빠르게)
     dict(w=336, near=16, mid=30, far=60, lod0=11.0, lod1=60.0, props=70, parts=True),
     dict(w=440, near=22, mid=44, far=90, lod0=17.0, lod1=90.0, props=140, parts=True),
-    dict(w=580, near=26, mid=54, far=120, lod0=26.0, lod1=120.0, props=220, parts=True),
+    # 높음: 디테일을 낮추지 않는 원래 그래픽 - 보이는 거리 끝까지 길을 한 칸씩, 모든 카트를 완전한 모양으로
+    dict(w=580, near=120, mid=120, far=120, lod0=1e9, lod1=1e9, props=220, parts=True),
 ]
 
 _draw_polygon = pygame.draw.polygon
@@ -25,6 +27,7 @@ _FACE_K = (0.98, 0.86, 0.76, 0.90, 1.12)          # FACES 순서: z+, z-, x+, x-
 _log = math.log
 _HEX_A = tuple(k * math.pi / 3.0 for k in range(6))           # 바퀴 육각형 꼭짓점 각도
 _HEX_B = tuple((k + 0.5) * math.pi / 3.0 for k in range(6))     # 트레드 면 가운데 각도
+_OIL_A = tuple(TAU * k / 14.0 for k in range(14))
 
 
 def _prop_metrics(p):
@@ -663,6 +666,20 @@ class Renderer(object):
         def P(u, v):
             x, y, z, _h = tr.pose_at(idx + v * hl, d + u * hw_)
             return self.proj(x, y + 0.07, z)
+        kind = pad.get('kind')
+        if kind == 'oil':                       # 기름 웅덩이: 울퉁불퉁한 검은 얼룩 + 무지갯빛 번들거림
+            self.poly((20, 14, 28), [P(math.cos(a) * (0.86 + 0.14 * math.sin(a * 3.0 + 1.0)), math.sin(a) * (0.82 + 0.18 * math.cos(a * 2.0)))
+                                     for a in _OIL_A])
+            self.poly((64, 52, 108), [P(-0.32 + math.cos(a) * 0.3, 0.2 + math.sin(a) * 0.2) for a in _OIL_A[::2]])
+            self.poly((40, 92, 96), [P(0.3 + math.cos(a) * 0.18, -0.28 + math.sin(a) * 0.14) for a in _OIL_A[::2]])
+            return
+        if kind == 'jump':                      # 점프대: 노란 경사판 + 검은 줄무늬 + 흰 화살표
+            self.poly((250, 196, 28), (P(-1, -1), P(1, -1), P(1, 1), P(-1, 1)))
+            for k in range(4):
+                u0 = -1 + k * 0.55
+                self.poly((30, 30, 34), (P(u0, -1), P(u0 + 0.22, -1), P(u0 + 0.22 + 0.3, -0.62), P(u0 + 0.3, -0.62)))
+            self.poly((255, 255, 255), (P(0, 0.85), P(0.75, 0.15), P(0.32, 0.15), P(0.32, -0.45), P(-0.32, -0.45), P(-0.32, 0.15), P(-0.75, 0.15)))
+            return
         self.poly((10, 28, 70), (P(-1, -1), P(1, -1), P(1, 1), P(-1, 1)))
         for n, v0 in enumerate((-0.55, 0.0, 0.55)):
             col = (25, 230, 255) if n % 2 == 0 else (255, 225, 74)

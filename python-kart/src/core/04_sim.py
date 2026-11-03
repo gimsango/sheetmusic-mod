@@ -445,6 +445,39 @@ class KartSim(object):
                         self.vz -= dz / dist * rel * 0.9
                         ev.append('bump')
 
+        # 맵 만들기 장애물 (원 기둥과 충돌) - 높이 뛰어 있거나 유령이면 통과
+        if t.obs_near and self.air_y < 0.9 and self.ghost_t <= 0:
+            obs = t.obs_near.get(self.hint)
+            if obs:
+                kr = 1.15 * (1.5 if self.giant_t > 0 else (0.7 if self.shrink_t > 0 else 1.0))
+                for ob in obs:
+                    dx = self.x - ob[0]
+                    dz = self.z - ob[1]
+                    rr = ob[2] + kr
+                    d2 = dx * dx + dz * dz
+                    if d2 < rr * rr:
+                        dist = math.sqrt(d2)
+                        if dist < 1e-4:
+                            nx, nz = -fx, -fz
+                        else:
+                            nx, nz = dx / dist, dz / dist
+                        self.x = ob[0] + nx * rr
+                        self.z = ob[1] + nz * rr
+                        vn = self.vx * nx + self.vz * nz
+                        if vn < 0:
+                            self.vx -= nx * vn * 1.45
+                            self.vz -= nz * vn * 1.45
+                            k = 1 - clamp(-vn / 70.0, 0.05, 0.3)
+                            self.vx *= k
+                            self.vz *= k
+                            if vn < -6:
+                                self.wall_hit = 1.0
+                                ev.append('wall')
+                            if self.drifting:
+                                self.drifting = False
+                                self.drift_charge = 0.0
+                                self.drift_tier = 0
+
         # 트랙 질의 + 벽
         t.query(self.x, self.z, self.hint, q)
         self.hint = q.idx
@@ -485,6 +518,19 @@ class KartSim(object):
                 elif di < -N / 2:
                     di += N
                 if abs(di * t.ds) < p['half_len'] and abs(q.d - p['d']) < p['half_w']:
+                    pk = p.get('kind')
+                    if pk == 'jump':
+                        if self.hop_t <= 0 and self.air_t <= 0:
+                            self.hop_t = self.hop_dur = 0.95
+                            ev.append('jump')
+                        self.pad_cool = 0.7
+                        break
+                    if pk == 'oil':
+                        if self.star_t <= 0 and self.auto_t <= 0:
+                            self.slide_t = max(self.slide_t, 1.4)
+                            ev.append('oil')
+                        self.pad_cool = 0.9
+                        break
                     self.boost_t = max(self.boost_t, 1.5)
                     ev.append('pad')
                     f = math.hypot(self.vx, self.vz)
@@ -525,6 +571,40 @@ class KartSim(object):
 
 
 class BotBrain(object):
+    def _avoid(self, tr, idx, lane):
+        """앞쪽 장애물들이 막은 가로 구간을 모아서, 지금 차선에서 가장 가까운 빈 틈으로 비켜 간다 (길이 다 막혔으면 갓길로)"""
+        N = tr.N
+        hw = tr.hw
+        lim = tr.wall_off - 2.0
+        blocked = []
+        seen = set()
+        for k in (2, 5, 8, 11, 14, 17):
+            lst = tr.obs_near.get((idx + k) % N)
+            if not lst:
+                continue
+            for ob in lst:
+                if id(ob) in seen:
+                    continue
+                seen.add(id(ob))
+                ahead = (ob[3] - idx) % N
+                if ahead < 1 or ahead > 18:
+                    continue
+                m = ob[2] + 1.8
+                blocked.append((ob[4] - m, ob[4] + m))
+        if not blocked:
+            return lane
+        if all(not (a < lane < b) for a, b in blocked):
+            return lane
+        best = None
+        best_s = 1e9
+        for a, b in blocked:
+            for c in (a - 0.05, b + 0.05):
+                if -lim <= c <= lim and all(not (a2 < c < b2) for a2, b2 in blocked):
+                    sc = abs(c - lane) + (4.0 if abs(c) > hw - 0.8 else 0.0)
+                    if sc < best_s:
+                        best_s, best = sc, c
+        return lane if best is None else best
+
     def __init__(self, rand):
         self.skill = 0.82 + rand() * 0.2
         self.lane = (rand() - 0.5) * 0.7
@@ -540,6 +620,8 @@ class BotBrain(object):
         self.t += dt
         look = int(clamp(round((kart.speed * 0.5 + 12) / tr.ds), 5, 34))
         lane = (self.lane + math.sin(self.t * 0.35 + self.phase) * 0.12) * tr.width * 0.5
+        if tr.obs_near:
+            lane = self._avoid(tr, q.idx, lane)
         i = (q.idx + look) % N
         tx = tr.px[i] + tr.rx[i] * lane
         tz = tr.pz[i] + tr.rz[i] * lane

@@ -20,6 +20,9 @@ SPRITE_DIM = {
     'chimney': (8.0, 22.0, 48, 132), 'pyramid': (14.0, 9.0, 112, 72), 'dome': (10.0, 5.6, 100, 56), 'icespike': (3.6, 6.0, 36, 60),
     'lantern': (1.4, 3.4, 20, 48), 'blocks': (4.0, 5.0, 40, 50), 'dish': (5.0, 6.0, 50, 60), 'sunflower': (3.0, 3.6, 36, 44),
     'cloud': (5.0, 3.0, 60, 36),
+    # 맵 만들기 장애물/장식
+    'cone': (0.75, 0.95, 24, 30), 'drum': (1.25, 1.5, 25, 30), 'crate': (1.8, 1.8, 36, 36), 'tires': (1.9, 1.7, 38, 34),
+    'block': (2.3, 1.2, 46, 24), 'lavapillar': (2.8, 9.5, 28, 95), 'volcano': (44.0, 24.0, 132, 72),
 }
 
 
@@ -329,6 +332,70 @@ def make_sprite(kind, th, var):
         _ell(s, c0, cx - 10, ch - 14, 16, 12)
         _ell(s, c0, cx + 6, ch - 18, 18, 15)
         _ell(s, shade_rgb(c0, 1.05), cx - 2, ch - 22, 10, 8)
+    elif kind == 'cone':
+        oc = (255, 118, 24)
+        pygame.draw.rect(s, (40, 40, 44), (2, ch - 4, cw - 4, 4))
+        pygame.draw.polygon(s, oc, [(cx - 9, ch - 4), (cx + 9, ch - 4), (cx + 2, 1), (cx - 2, 1)])
+        pygame.draw.polygon(s, shade_rgb(oc, 0.78), [(cx + 1, 1), (cx + 2, 1), (cx + 9, ch - 4), (cx + 3, ch - 4)])
+        pygame.draw.polygon(s, (250, 250, 250), [(cx - 6.4, ch - 12), (cx + 6.4, ch - 12), (cx + 5.0, ch - 17), (cx - 5.0, ch - 17)])
+        pygame.draw.polygon(s, (250, 250, 250), [(cx - 3.8, ch - 21), (cx + 3.8, ch - 21), (cx + 2.8, ch - 24), (cx - 2.8, ch - 24)])
+    elif kind == 'drum':
+        dc = (36, 120, 220)
+        _rr(s, dc, (2, 3, cw - 4, ch - 3), 3)
+        pygame.draw.rect(s, shade_rgb(dc, 0.72), (cw - 9, 4, 6, ch - 5))
+        for y in (8, ch // 2, ch - 7):
+            pygame.draw.rect(s, shade_rgb(dc, 0.6), (2, y, cw - 4, 2))
+        _ell(s, shade_rgb(dc, 1.25), cx, 4, cw / 2 - 2, 3)
+        pygame.draw.circle(s, (230, 230, 230), (int(cx - 3), 4), 2)
+    elif kind == 'crate':
+        wc = (192, 140, 78)
+        pygame.draw.rect(s, wc, (1, 2, cw - 2, ch - 2))
+        pygame.draw.rect(s, shade_rgb(wc, 0.68), (1, 2, cw - 2, ch - 2), 3)
+        pygame.draw.line(s, shade_rgb(wc, 0.68), (3, 4), (cw - 4, ch - 3), 3)
+        pygame.draw.line(s, shade_rgb(wc, 0.68), (cw - 4, 4), (3, ch - 3), 3)
+        for y in (ch // 3, 2 * ch // 3):
+            pygame.draw.line(s, shade_rgb(wc, 0.85), (3, y), (cw - 4, y), 1)
+        pygame.draw.rect(s, shade_rgb(wc, 1.2), (1, 2, cw - 2, 3))
+    elif kind == 'tires':
+        for k in range(3):
+            y = ch - 11 - k * 10
+            _ell(s, (24, 24, 28), cx, y + 4, cw / 2 - 1, 7)
+            _ell(s, (44, 44, 50), cx, y + 1, cw / 2 - 2, 6)
+            _ell(s, (14, 14, 16), cx, y + 1, cw / 4, 3)
+            pygame.draw.arc(s, (230, 40, 40) if k % 2 == 0 else (240, 240, 240), (2, y - 5, cw - 4, 12), 0.2, 2.9, 2)
+    elif kind == 'block':
+        bc = (226, 226, 230)
+        pygame.draw.polygon(s, bc, [(1, ch), (cw - 1, ch), (cw - 5, ch - 9), (cw - 9, 1), (9, 1), (5, ch - 9)])
+        pygame.draw.polygon(s, shade_rgb(bc, 0.8), [(1, ch), (cw - 1, ch), (cw - 5, ch - 9), (5, ch - 9)])
+        for x in range(4, cw - 6, 10):
+            pygame.draw.polygon(s, (220, 40, 40), [(x + 6, 3), (x + 10, 3), (x + 4, ch - 10), (x, ch - 10)])
+    elif kind == 'lavapillar':
+        bc = mix_rgb(rk[0], (34, 28, 30), 0.6)
+        lava = (255, 120, 24)
+        pygame.draw.rect(s, shade_rgb(bc, 0.8), (2, ch - 8, cw - 4, 8))
+        pygame.draw.polygon(s, bc, [(5, ch - 6), (cw - 5, ch - 6), (cw - 7, 8), (7, 8)])
+        pygame.draw.polygon(s, shade_rgb(bc, 0.7), [(cx + 2, ch - 6), (cw - 5, ch - 6), (cw - 7, 8), (cx + 2, 8)])
+        for k, y in enumerate(range(16, ch - 12, 14)):
+            x0 = 8 + (k * 5) % 9
+            pygame.draw.line(s, lava, (x0, y), (x0 + 6, y + 5), 2)
+            pygame.draw.line(s, (255, 220, 120), (x0 + 6, y + 5), (x0 + 3, y + 10), 1)
+        _ell(s, (255, 90, 20), cx, 8, cw / 2 - 6, 4)
+        _ell(s, (255, 220, 110), cx, 7, cw / 2 - 10, 2)
+        for k in range(3):
+            pygame.draw.circle(s, (255, 150, 40), (int(cx - 5 + k * 5), 4 - k % 2), 2)
+    elif kind == 'volcano':
+        vc = mix_rgb(rk[0], (70, 44, 34), 0.55)
+        lava = (255, 110, 24)
+        pygame.draw.polygon(s, vc, [(0, ch), (cw, ch), (cx + 16, 12), (cx - 16, 12)])
+        pygame.draw.polygon(s, shade_rgb(vc, 0.75), [(cx + 2, ch), (cw, ch), (cx + 16, 12), (cx + 2, 12)])
+        _ell(s, (60, 20, 14), cx, 12, 16, 4)
+        _ell(s, lava, cx, 12, 12, 3)
+        for k, (x1, x2) in enumerate(((cx - 6, cx - 30), (cx + 4, cx + 22), (cx - 1, cx - 8))):
+            pts = [(x1, 14), (x1 + (x2 - x1) * 0.4 + 3, 30 + k * 6), (x2, ch - 6 - k * 8)]
+            pygame.draw.lines(s, lava, False, pts, 3)
+            pygame.draw.lines(s, (255, 210, 110), False, pts, 1)
+        for k in range(4):
+            pygame.draw.circle(s, (255, 160, 60), (int(cx - 9 + k * 6), 6 - (k % 2) * 3), 2)
     return s
 
 

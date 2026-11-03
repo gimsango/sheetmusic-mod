@@ -465,8 +465,12 @@ class World(object):
 
     def _pads(self):
         tr = self.track
-        tex = tex_pad()
+        texs = {}
         for p in tr.pads:
+            pk = p.get('kind') or 'boost'
+            tex = texs.get(pk)
+            if tex is None:
+                tex = texs[pk] = tex_pad() if pk == 'boost' else (tex_jump() if pk == 'jump' else tex_oil())
             idx, d = p['idx'], p['d']
             hl = p['half_len'] / tr.ds
             hwp = p['half_w']
@@ -481,6 +485,8 @@ class World(object):
             np_.setLightOff()
             np_.setTwoSided(True)
             np_.setDepthOffset(3)
+            if pk == 'oil':
+                np_.setTransparency(TransparencyAttrib.MAlpha)
 
     # ---- 장식물 -----------------------------------------------------------------------------
     def _proto(self, kind, var):
@@ -698,6 +704,62 @@ class World(object):
             c0 = leaf[0] if leaf[0][0] > 200 else (250, 252, 255)
             for (x, y, z, r) in ((-1.0, 0, 1.0, 1.2), (0.6, 0.2, 1.3, 1.5), (0.0, -0.3, 1.9, 1.0), (1.5, -0.1, 0.8, 0.9)):
                 m.sphere((x, y, z), r, rgbf(c0), 9, 5)
+        # ---- 맵 만들기 장애물/장식 ----
+        elif kind == 'cone':
+            oc = rgbf((255, 118, 24))
+            m.box((0, 0, 0.03), (0.42, 0.42, 0.03), rgbf((40, 40, 44)))
+            m.frustum((0, 0, 0.5), 0.3, 0.05, 0.9, oc, 'z', 10)
+            g.frustum((0, 0, 0.52), 0.215, 0.165, 0.14, (1.6, 1.6, 1.6, 1), 'z', 10)
+            g.frustum((0, 0, 0.74), 0.13, 0.095, 0.1, (1.6, 1.6, 1.6, 1), 'z', 10)
+        elif kind == 'drum':
+            dc = (36, 120, 220)
+            m.frustum((0, 0, 0.72), 0.58, 0.58, 1.44, rgbf(dc), 'z', 12)
+            for z in (0.3, 0.72, 1.14):
+                m.frustum((0, 0, z), 0.6, 0.6, 0.06, rgbf(dc, 0.6), 'z', 12)
+            m.disc((0, 0, 1.445), 0.5, rgbf(dc, 1.2), 'z', 12)
+        elif kind == 'crate':
+            wc = (192, 140, 78)
+            m.box((0, 0, 0.9), (0.9, 0.9, 0.9), rgbf(wc))
+            for sx in (-1, 1):
+                for sy in (-1, 1):
+                    m.box((sx * 0.86, sy * 0.86, 0.9), (0.07, 0.07, 0.92), rgbf(wc, 0.65))
+            for z in (0.06, 1.74):
+                m.box((0, 0, z), (0.93, 0.93, 0.07), rgbf(wc, 0.7))
+        elif kind == 'tires':
+            for k in range(3):
+                z = 0.28 + k * 0.5
+                m.frustum((0, 0, z), 0.95, 0.95, 0.46, rgbf((30, 30, 34)), 'z', 14)
+                m.frustum((0, 0, z + 0.235), 0.42, 0.42, 0.02, rgbf((12, 12, 14)), 'z', 10)
+                m.frustum((0, 0, z), 0.97, 0.97, 0.08, rgbf((220, 40, 40) if k % 2 == 0 else (235, 235, 235)), 'z', 14)
+        elif kind == 'block':
+            bc = (226, 226, 230)
+            m.box((0, 0, 0.35), (1.15, 0.45, 0.35), rgbf(bc))
+            m.box((0, 0, 0.95), (1.15, 0.22, 0.27), rgbf(bc), taper=(1.0, 0.7))
+            for x in (-0.8, -0.27, 0.27, 0.8):
+                m.box((x, -0.46, 0.6), (0.1, 0.02, 0.45), rgbf((220, 40, 40)))
+                m.box((x, 0.46, 0.6), (0.1, 0.02, 0.45), rgbf((220, 40, 40)))
+        elif kind == 'lavapillar':
+            bc = mix_rgb(rc[0], (34, 28, 30), 0.6)
+            m.frustum((0, 0, 0.35), 1.5, 1.4, 0.7, rgbf(bc, 0.8), 'z', 6)
+            m.frustum((0, 0, 4.9), 1.15, 0.95, 8.4, rgbf(bc), 'z', 6)
+            for k in range(6):
+                a = k * 1.047 + 0.3
+                z = 1.6 + k * 1.15
+                x, y = math.cos(a) * 1.06, math.sin(a) * 1.06
+                g.box((x, y, z), (0.12, 0.12, 0.42), (2.4, 0.9, 0.2, 1))
+            g.frustum((0, 0, 9.12), 0.88, 0.7, 0.16, (2.6, 1.0, 0.25, 1), 'z', 6)
+            g.sphere((0, 0, 9.3), 0.45, (2.8, 1.5, 0.4, 1), 6, 3)
+        elif kind == 'volcano':
+            vc = mix_rgb(rc[0], (70, 44, 34), 0.55)
+            m.frustum((0, 0, 11.0), 22.0, 5.5, 22.0, rgbf(vc), 'z', 14, False)
+            m.frustum((0, 0, 21.5), 5.6, 4.2, 1.0, rgbf(vc, 0.7), 'z', 14)
+            g.disc((0, 0, 21.9), 4.0, (2.6, 0.9, 0.2, 1), 'z', 14)
+            for k in range(5):
+                a = k * 1.26 + 0.4
+                for j in range(6):
+                    t = j / 6.0
+                    r = 5.0 + t * 15.0
+                    g.box((math.cos(a + t * 0.25) * r, math.sin(a + t * 0.25) * r, 21.2 - t * 20.0), (0.5, 0.5, 1.9), (2.4, 0.8, 0.15, 1))
         return m, (g if g.v else None)
 
     def _props(self):

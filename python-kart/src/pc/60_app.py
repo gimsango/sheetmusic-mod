@@ -74,6 +74,10 @@ class Game(ShowBase):
         self.shake = 0.0
         self.show_fps = bool(args.get('fps'))
         self.loading_txt = None
+        self.store = MapStore()            # 내가 만든 맵 목록
+        self.maker = PCMapMaker(self)      # 맵 만들기 편집기
+        self.test_map = None               # 편집기 '시험 주행' 중인 맵
+        self.sel_cmap = 0
         self.shown_scene = None
         self.pad = None
         try:
@@ -90,7 +94,7 @@ class Game(ShowBase):
         except Exception:
             pass
         names = ['arrow_up', 'arrow_down', 'arrow_left', 'arrow_right', 'w', 'a', 's', 'd', 'space', 'lshift', 'rshift', 'lcontrol', 'rcontrol',
-                 'r', 'm', 'enter', 'escape', 'f11', 'backspace', 't', '1', '2', '3', 'face_x', 'face_y', 'face_b']
+                 'r', 'm', 'enter', 'escape', 'f11', 'backspace', 't', '1', '2', '3', 'face_x', 'face_y', 'face_b', 'z', 'f']
         for k in names:
             self.accept(k, self._kdown, [k])
             self.accept(k + '-up', self._kup, [k])
@@ -139,6 +143,9 @@ class Game(ShowBase):
             except Exception:
                 pass
             return
+        if self.scene == 'editor':
+            self.maker.on_key(k)
+            return
         if self.scene == 'race':
             if k in ITEM_KEYS_PC:
                 self.use_item(ITEM_KEYS_PC[k])
@@ -173,9 +180,13 @@ class Game(ShowBase):
         sc = self.scene
         if sc == 'menu':
             self.userExit()
-        elif sc in ('solo', 'garage', 'settings', 'multi'):
+        elif sc in ('solo', 'garage', 'settings', 'multi', 'maps'):
             self.profile.save()
             self.go('menu')
+        elif sc == 'mapitem':
+            self.go('maps')
+        elif sc == 'editor':
+            self.maker.try_exit()
         elif sc == 'lobby':
             self.session.leave()
             self.go('menu')
@@ -275,6 +286,8 @@ class Game(ShowBase):
         self.scene = scene
         self.err = ''
         self.menu.clear_extra()
+        if scene != 'editor':
+            self.maker.leave_ui()
         if scene != 'race':
             self.hud.show(False)
             self.item_hud.show(False)
@@ -294,11 +307,18 @@ class Game(ShowBase):
             self.build_multi()
         elif scene == 'lobby':
             self.build_lobby()
+        elif scene == 'maps':
+            self.build_maps()
+        elif scene == 'mapitem':
+            self.build_mapitem()
+        elif scene == 'editor':
+            self.maker.enter()
 
     def build_main(self):
         self.menu.clear_extra()
         rows = [self.R(T('솔로 레이스', 'Solo race'), lambda: self.go('solo'), kind='primary', id='solo'),
                 self.R(T('WiFi 멀티플레이', 'WiFi multiplayer'), lambda: self.go('multi'), kind='primary', id='multi'),
+                self.R(T('맵 만들기 (내 맵 %d개)' % len(self.store.maps), 'Map maker (%d maps)' % len(self.store.maps)), lambda: self.go('maps'), id='maps'),
                 self.R(T('차고 (카트 꾸미기)', 'Garage (customize)'), lambda: self.go('garage'), id='garage'),
                 self.R(T('설정', 'Settings'), lambda: self.go('settings'), id='settings'),
                 self.R(T('종료', 'Quit'), self.userExit, id='quit')]
@@ -310,7 +330,10 @@ class Game(ShowBase):
     # ---- 솔로 ----
     def draw_outline(self, mid):
         self.menu.clear_extra()
-        tr = Track(mid, True)
+        try:
+            tr = Track(mid, True)
+        except Exception:
+            return
         b = tr.bounds
         span = max(b[1] - b[0], b[3] - b[2], 1.0)
         aspect = self.getAspectRatio()
@@ -337,7 +360,35 @@ class Game(ShowBase):
         self.menu.nodes.append(t)
         self.outline_len = tr.length
 
+    def custom_rows(self, editable=True):
+        """'내가 만든 맵' 고르기 행 (←→ 로 바꾸기). 반환: (행 목록, 고른 맵 또는 None)"""
+        maps = self.store.maps
+        if not maps:
+            return [self.I(T('아직 만든 맵이 없어요 -> 메뉴의 [맵 만들기]', 'No custom maps yet -> Map maker'), (1, 0.75, 0.5, 1)),
+                    self.R(T('맵 만들기로 가기', 'Open map maker'), lambda: self.go('maps'), id='gomaps')], None
+        i = max(0, self.store.index(self.profile['cmap']))
+        d = maps[i]
+
+        def cm(dd):
+            def f(m=1):
+                j = (self.store.index(self.profile['cmap']) + dd) % len(self.store.maps)
+                self.profile['cmap'] = self.store.maps[j]['uid']
+                self.profile.save()
+                self.rebuild_scene()
+            return f
+        self.profile['cmap'] = d['uid']
+        rows = [self.R(u'%s  < \u2605 %s  (%d/%d) >' % (T('내 맵', 'My map'), d['name'], i + 1, len(maps)), None, cm(-1), cm(1), id='cmap', enabled=editable)]
+        return rows, d
+
+    def rebuild_scene(self):
+        if self.scene == 'solo':
+            self.build_solo()
+        elif self.scene == 'lobby':
+            self._lobby_sig = None
+
     def build_solo(self):
+        if self.profile['map_src'] == 'custom':
+            return self.build_solo_custom()
         mid = self.sel_map = wrap_map(self.sel_map)
         info = map_info(mid)
         name = info['name'] if LANG == 'ko' else info['name_en']
@@ -395,7 +446,13 @@ class Game(ShowBase):
             self.profile.save()
             self.build_solo()
         mname = T('아이템전 (아이템 100종)', 'Item battle (100 items)') if self.profile['mode'] == 'item' else T('스피드전', 'Speed race')
+
+        def src(m=1):
+            self.profile['map_src'] = 'custom'
+            self.profile.save()
+            self.build_solo()
         rows = [self.R('%s  < %s >' % (T('모드', 'Mode'), mname), mode, mode, mode, id='mode'),
+                self.R('%s  < %s >' % (T('맵 종류', 'Maps'), T('기본 맵 1000개', 'Built-in 1000')), src, src, src, id='src'),
                 self.R('%s  < #%d / %d >' % (T('맵', 'Map'), mid, MAP_COUNT), typemap, chg(-1), chg(1), id='map'),
                 self.R('%s  < %s (%d/%d) >' % (T('바이옴', 'Biome'), fname, fam + 1, BIOME_FAMILIES), None, setpart(0, -1), setpart(0, 1), id='theme'),
                 self.R('%s  < %s >' % (T('시간대', 'Time'), tname), None, setpart(1, -1), setpart(1, 1), id='time'),
@@ -407,6 +464,127 @@ class Game(ShowBase):
         self.menu.set(T('솔로 레이스', 'Solo race'), rows, '%s  ·  %s' % (name, theme),
                       T('←→ ±1   Shift ±10   Ctrl ±100   R 랜덤   T 바이옴   Enter(맵) 번호 입력', 'Left/Right ±1   Shift ±10   Ctrl ±100   R random   T biome   Enter on map: type number'))
         self.draw_outline(mid)
+
+    def build_solo_custom(self):
+        def mode(m=1):
+            self.profile['mode'] = 'speed' if self.profile['mode'] == 'item' else 'item'
+            self.profile.save()
+            self.build_solo()
+
+        def src(m=1):
+            self.profile['map_src'] = 'builtin'
+            self.profile.save()
+            self.build_solo()
+
+        def lap(dd):
+            def f(m=1):
+                self.profile['laps'] = int(clamp(int(self.profile['laps']) + dd, 1, 10))
+                self.build_solo()
+            return f
+
+        def bots(dd):
+            def f(m=1):
+                self.profile['bots'] = int(clamp(int(self.profile['bots']) + dd, 0, 11))
+                self.build_solo()
+            return f
+
+        def start():
+            self.profile.save()
+            self.start_solo()
+        mname = T('아이템전 (아이템 100종)', 'Item battle (100 items)') if self.profile['mode'] == 'item' else T('스피드전', 'Speed race')
+        crows, d = self.custom_rows()
+        rows = [self.R('%s  < %s >' % (T('모드', 'Mode'), mname), mode, mode, mode, id='mode'),
+                self.R('%s  < %s >' % (T('맵 종류', 'Maps'), T('내가 만든 맵 (%d)' % len(self.store.maps), 'My maps (%d)' % len(self.store.maps))), src, src, src, id='src')]
+        rows += crows
+        if d is not None:
+            rows.append(self.R(T('이 맵 편집하기', 'Edit this map'), lambda: self.maker.open(d, d['uid']), id='edit'))
+        rows += [self.R('%s  < %d >' % (T('바퀴 수', 'Laps'), int(self.profile['laps'])), None, lap(-1), lap(1), id='laps'),
+                 self.R('%s  < %d >' % (T('AI 상대', 'AI rivals'), int(self.profile['bots'])), None, bots(-1), bots(1), id='bots')]
+        if d is not None:
+            rows.append(self.R(T('출발!', 'START!'), start, kind='primary', id='start'))
+        rows.append(self.R(T('뒤로', 'Back'), lambda: self.back(), id='back'))
+        sub = ''
+        if d is not None:
+            th = biome(d['look'])
+            sub = u'\u2605 %s  ·  %s' % (d['name'], th['name'] if LANG == 'ko' else th['en'])
+        self.menu.set(T('솔로 레이스', 'Solo race'), rows, sub, T('←→ 값 변경   Enter 확인', 'Left/Right change   Enter OK'))
+        if d is not None:
+            self.draw_outline(d)
+        else:
+            self.menu.clear_extra()
+
+    # ---- 맵 만들기 (목록) ----
+    def build_maps(self):
+        def new():
+            n = len(self.store.maps) + 1
+            self.maker.open(cmap_new(T('나의 맵 %d' % n, 'My map %d' % n), int(self.profile['map'])), None)
+
+        def imp_d(dd):
+            def f(m=1):
+                self.import_mid = wrap_map(getattr(self, 'import_mid', 1) + dd * m)
+                self.build_maps()
+            return f
+
+        def imp():
+            mid = getattr(self, 'import_mid', 1)
+            self.maker.open(cmap_from_builtin(mid, map_info(mid)['name' if LANG == 'ko' else 'name_en']), None)
+        rows = [self.R(T('+ 새 맵 만들기', '+ New map'), new, kind='primary', id='new'),
+                self.R('%s  < #%d >' % (T('기본 맵 코스로 시작', 'Start from built-in map'), getattr(self, 'import_mid', 1)), imp, imp_d(-1), imp_d(1), id='imp')]
+        for i, d in enumerate(self.store.maps[:14]):
+            def pick(uid=d['uid']):
+                self.sel_cmap_uid = uid
+                self.go('mapitem')
+            rows.append(self.R(u'\u2605 %s   (%d)' % (d['name'], len(d['objs'])), pick, id='m_' + d['uid']))
+        if len(self.store.maps) > 14:
+            rows.append(self.I(T('(맵이 많아서 14개까지만 보여요)', '(showing the first 14 maps)')))
+        rows.append(self.R(T('뒤로', 'Back'), lambda: self.back(), id='back'))
+        self.menu.set(T('맵 만들기', 'Map maker'), rows, T('내 맵 %d개 · 파일 kart3d_maps.json (폰과 같은 형식)', '%d maps · file kart3d_maps.json (same as phone)') % len(self.store.maps)
+                      if LANG == 'ko' else 'Map maker', T('Enter = 열기   ←→ = 번호 바꾸기', 'Enter = open   Left/Right = change number'))
+        self.menu.clear_extra()
+
+    def build_mapitem(self):
+        uid = getattr(self, 'sel_cmap_uid', '')
+        d = self.store.get(uid)
+        if d is None:
+            self.go('maps')
+            return
+
+        def race():
+            self.profile['map_src'] = 'custom'
+            self.profile['cmap'] = uid
+            self.profile.save()
+            self.go('solo')
+
+        def rename():
+            def done(t):
+                t = t.strip()
+                if t:
+                    dd = dict(d)
+                    dd['name'] = t
+                    self.store.put(dd)
+                self.build_mapitem()
+            self.input.begin(T('맵 이름 (Enter 확인)', 'Map name (Enter = OK)'), d['name'], 20, 'alpha', done)
+
+        def delete():
+            if getattr(self, '_del_armed', None) == uid:
+                self.store.delete(uid)
+                self._del_armed = None
+                if self.profile['cmap'] == uid:
+                    self.profile['cmap'] = ''
+                    self.profile['map_src'] = 'builtin'
+                self.go('maps')
+            else:
+                self._del_armed = uid
+                self.build_mapitem()
+        armed = getattr(self, '_del_armed', None) == uid
+        th = biome(d['look'])
+        rows = [self.R(T('편집하기', 'Edit'), lambda: self.maker.open(d, uid), kind='primary', id='edit'),
+                self.R(T('이 맵으로 달리기 (솔로)', 'Race this map (solo)'), race, id='race'),
+                self.R(T('이름 바꾸기', 'Rename'), rename, id='rename'),
+                self.R(T('정말 삭제! (Enter 한 번 더)', 'Really delete! (Enter again)') if armed else T('삭제', 'Delete'), delete, id='del'),
+                self.R(T('뒤로', 'Back'), lambda: self.go('maps'), id='back')]
+        self.menu.set(u'\u2605 ' + d['name'], rows, '%s  ·  %s %d' % (th['name'] if LANG == 'ko' else th['en'], T('물건', 'objects'), len(d['objs'])), '')
+        self.draw_outline(d)
 
     # ---- 차고 ----
     def build_garage(self):
@@ -537,7 +715,8 @@ class Game(ShowBase):
         ips = local_ips()
 
         def host():
-            if self.session.host_game(int(self.profile['port'])):
+            cm = self.store.get(self.profile['cmap']) if self.profile['map_src'] == 'custom' else None
+            if self.session.host_game(int(self.profile['port']), cm):
                 self.go('lobby')
             else:
                 self.err = self.session.error
@@ -564,7 +743,8 @@ class Game(ShowBase):
                 self.profile['last_ip'] = rm['ip']
                 self.session.join_game(rm['ip'], rm.get('port', DEFAULT_PORT))
                 self.go('lobby')
-            rows.append(self.R('%s  %s  %d/%d  #%s' % (rm.get('name', 'room'), rm['ip'], rm.get('players', 0), RoomServer.MAX_PLAYERS, rm.get('map', '?')), joiner,
+            mlab = (u'\u2605 ' + str(rm['cname'])) if rm.get('cname') else '#%s' % rm.get('map', '?')
+            rows.append(self.R('%s  %s  %d/%d  %s' % (rm.get('name', 'room'), rm['ip'], rm.get('players', 0), RoomServer.MAX_PLAYERS, mlab), joiner,
                                enabled=rm.get('state') == 'lobby', id='room%d' % i))
         if self.err:
             rows.append(self.I(self.err, (1, 0.5, 0.5, 1)))
@@ -584,6 +764,9 @@ class Game(ShowBase):
             rows.append(self.I(('* ' if p['id'] == ses.host_id else '  ') + p['name'] + ('  (YOU)' if p['id'] == ses.my_id else ''), (1, 0.72, 0.15, 1) if p['id'] == ses.my_id else None, 0.05))
         info = map_info(st['map'])
         mname = '%s  ·  %s' % ((info['name'], info['theme_name']) if LANG == 'ko' else (info['name_en'], info['theme_en']))
+        cmd = st.get('cmap')
+        if cmd:
+            mname = u'\u2605 %s  (%s)' % (cmd.get('name', '?'), T('직접 만든 맵', 'custom map'))
         if ses.is_host:
             def mp(d):
                 def f(m=1):
@@ -604,29 +787,72 @@ class Game(ShowBase):
                 on = not bool(st.get('items'))
                 ses.send_settings(items=on)
                 self.profile['mode'] = 'item' if on else 'speed'
+
+            def srcf(m=1):
+                if cmd:
+                    ses.send_settings(map=int(st['map']))
+                    self.profile['map_src'] = 'builtin'
+                else:
+                    d = self.store.get(self.profile['cmap']) or (self.store.maps[0] if self.store.maps else None)
+                    if d is not None:
+                        self.profile['cmap'] = d['uid']
+                        ses.send_settings(cmap=d)
+                        self.profile['map_src'] = 'custom'
+
+            def cmf(dd):
+                def f(m=1):
+                    maps = self.store.maps
+                    if maps:
+                        j = (self.store.index(self.profile['cmap']) + dd) % len(maps)
+                        self.profile['cmap'] = maps[j]['uid']
+                        ses.send_settings(cmap=maps[j])
+                return f
             rows += [self.R('%s  < %s >' % (T('모드', 'Mode'), T('아이템전', 'Item battle') if st.get('items') else T('스피드전', 'Speed race')), md, md, md, id='mode'),
-                     self.R('%s  < #%d >' % (T('맵', 'Map'), st['map']), None, mp(-1), mp(1), id='map'),
+                     self.R('%s  < %s >' % (T('맵 종류', 'Maps'), T('내가 만든 맵', 'My maps') if cmd else T('기본 맵', 'Built-in')), srcf, srcf, srcf, id='src',
+                            enabled=bool(cmd) or bool(self.store.maps))]
+            if cmd:
+                rows.append(self.R(u'%s  < \u2605 %s >' % (T('내 맵', 'My map'), cmd.get('name', '?')), None, cmf(-1), cmf(1), id='cmap'))
+            else:
+                rows.append(self.R('%s  < #%d >' % (T('맵', 'Map'), st['map']), None, mp(-1), mp(1), id='map'))
+            rows += [
                      self.R('%s  < %d >' % (T('바퀴 수', 'Laps'), st['laps']), None, lp(-1), lp(1), id='laps'),
                      self.R('%s  < %d >' % (T('AI 봇', 'Bots'), st['bots']), None, bp(-1), bp(1), id='bots'),
                      self.R(T('레이스 시작!', 'START RACE!'), ses.start_race, kind='primary', id='start')]
             ips = local_ips()
             rows.append(self.I(T('친구에게 알려주세요: ', 'Tell your friends: ') + (ips[0] if ips else '?') + ':%d' % self.profile['port'], (1, 0.86, 0.47, 1)))
         else:
-            rows.append(self.I('%s #%d   %s %d   %s %d   %s' % (T('맵', 'Map'), st['map'], T('바퀴', 'Laps'), st['laps'], T('봇', 'Bots'), st['bots'],
+            mlab = (u'\u2605 ' + cmd.get('name', '?')) if cmd else '#%d' % st['map']
+            rows.append(self.I('%s %s   %s %d   %s %d   %s' % (T('맵', 'Map'), mlab, T('바퀴', 'Laps'), st['laps'], T('봇', 'Bots'), st['bots'],
                                                              T('아이템전', 'Item battle') if st.get('items') else T('스피드전', 'Speed race'))))
+            if cmd:
+                def save_it(d=cmd):
+                    if self.store.add_copy(d):
+                        self.err = T('내 맵에 저장했어요', 'Saved to My maps')
+                rows.append(self.R(T('이 맵을 내 맵에 저장', 'Save this map to My maps'), save_it, id='savemap'))
             rows.append(self.I(T('방장이 시작하기를 기다리는 중…', 'Waiting for the host…')))
         rows.append(self.R(T('나가기', 'Leave'), lambda: self.back(), id='leave'))
         self.menu.set(T('로비', 'Lobby'), rows, mname, T('←→ 값 변경 (Shift ±10, Ctrl ±100)', 'Left/Right change (Shift ±10, Ctrl ±100)'))
-        key = (st['map'])
+        key = (st['map'], cmap_key(cmd) if cmd else None)
         if getattr(self, '_lobby_map', None) != key or not self.menu.extra.getChildren():
-            self.draw_outline(int(st['map']))
+            self.draw_outline(cmd if cmd else int(st['map']))
             self._lobby_map = key
 
     # ------------------------------------------------------------------ 레이스
+    def solo_map(self):
+        if self.test_map is not None:
+            return self.test_map
+        if self.profile['map_src'] == 'custom':
+            d = self.store.get(self.profile['cmap'])
+            if d is not None:
+                return d
+        return int(self.profile['map'])
+
     def start_solo(self):
         p = self.profile
         entries = solo_entries(p.display_name(), p['kart'], int(p['bots']))
-        self.start_race(int(p['map']), int(p['laps']), entries, False, True, 5.0, p['mode'] == 'item')
+        ref = self.solo_map()
+        self.start_race(ref, int(p['laps']) if self.test_map is None else int(ref['laps']), entries, False, True,
+                        5.0 if self.test_map is None else 3.0, p['mode'] == 'item')
 
     def use_item(self, slot):
         if self.race is not None and self.race.items is not None and not (self.paused and not self.race.multi):
@@ -635,7 +861,7 @@ class Game(ShowBase):
     def start_race(self, map_id, laps, entries, multi, is_host, countdown, items=False):
         self.menu.show(False)
         self.menu.clear_extra()
-        self.loading(T('맵 생성 중… #%d' % map_id, 'Building map… #%d' % map_id))
+        self.loading(T('맵 생성 중… ', 'Building map… ') + map_title(map_id, LANG))
         self.destroy_world()
         self.race = Race(map_id, laps, entries, multi=multi, is_host=is_host, countdown=countdown, net=self.session.net if multi else None, items=items)
         self.world = World(self, self.race.track)
@@ -651,8 +877,7 @@ class Game(ShowBase):
         wk = self.race.track.theme.get('weather')
         self.weather = Weather(self, wk, self.race.track.theme.get('wcol')) if wk else None
         self.hud.build_minimap(self.race.track)
-        nm = self.race.track.info['name' if LANG == 'ko' else 'name_en']
-        self.hud.mapname.setText('#%d %s' % (map_id, nm))
+        self.hud.mapname.setText(map_title(map_id, LANG))
         self.hud.show(True)
         self.chase = ChaseCam()
         self.steer = 0.0
@@ -690,6 +915,12 @@ class Game(ShowBase):
         self.destroy_world()
         if multi:
             self.session.leave()
+        if self.test_map is not None:
+            self.test_map = None
+            if self.maker.ed is not None:
+                self.maker.need_cv = True
+                self.go('editor')
+                return
         self.go('menu')
 
     def read_input(self, dt):
@@ -747,6 +978,12 @@ class Game(ShowBase):
                 elif e in ('wall', 'bump'):
                     self.audio.play('bump')
                     self.shake = max(self.shake, 0.6)
+                elif e == 'jump':
+                    self.audio.play('lap', 0.7)
+                    self.hud.say(T('점프!', 'JUMP!'), 0.7, False, (1, 0.88, 0.3, 1))
+                elif e == 'oil':
+                    self.audio.play('ihit', 0.6)
+                    self.hud.say(T('미끌!', 'SLIPPERY!'), 0.8, False, (0.75, 0.6, 1, 1))
                 elif e.startswith('tier'):
                     self.audio.play('tier')
 
@@ -969,14 +1206,18 @@ class Game(ShowBase):
         if sc in ('multi',) and self.scan.get('done'):
             self.scan['done'] = False
             self.build_multi()
-        if sc in ('lobby', 'multi', 'menu', 'solo', 'garage', 'settings') or (sc == 'race' and self.race is None):
+        if sc == 'editor':
+            self.maker.update(dt)
+            return task.cont
+        if sc in ('lobby', 'multi', 'menu', 'solo', 'garage', 'settings', 'maps', 'mapitem') or (sc == 'race' and self.race is None):
             if self.session.net is not None and sc == 'lobby':
                 self.session.pump()
                 if self.session.start_msg is not None:
                     msg = self.session.start_msg
                     self.session.start_msg = None
                     entries = self.session.entries_from_start(msg)
-                    self.start_race(int(msg['map']), int(msg['laps']), entries, True, self.session.is_host, float(msg.get('countdown', 5.0)), bool(msg.get('items')))
+                    ref = msg.get('cmap') or int(msg['map'])
+                    self.start_race(ref, int(msg['laps']), entries, True, self.session.is_host, float(msg.get('countdown', 5.0)), bool(msg.get('items')))
                     return task.cont
                 if self.session.state == 'idle':
                     self.err = self.session.error or T('연결 실패', 'Connection failed')

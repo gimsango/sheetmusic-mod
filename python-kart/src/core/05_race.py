@@ -101,15 +101,16 @@ class Racer(object):
 
 class Race(object):
     def __init__(self, map_id, laps, entries, multi=False, is_host=True, countdown=5.0, net=None, auto_local=False, items=False):
-        self.map_id = map_id
+        self.map_id = map_id              # 기본 맵 번호 또는 만든 맵 데이터(dict)
         self.track = Track(map_id)
+        self.custom = self.track.custom
         self.laps = laps
         self.multi = multi
         self.is_host = is_host
         self.net = net
         self.racers = []
         self.local = None
-        rnd = Rng(map_id * 31 + 7)
+        rnd = Rng(map_id * 31 + 7) if self.custom is None else Rng((self.track.info['seed'] ^ 0x5151) & 0xFFFFFFFF)
         for e in entries:
             rc = Racer(e['id'], e['name'], e['kart'], e['slot'], e['kind'])
             if rc.kind != 'remote':

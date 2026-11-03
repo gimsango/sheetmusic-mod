@@ -73,6 +73,7 @@ class RoomServer(object):
         self.lock = threading.RLock()
         self.host_id = None
         self.map = 1
+        self.cmap = None              # 방장이 고른 '만든 맵' 데이터 (있으면 이 맵으로 달림)
         self.laps = 3
         self.bots = 0
         self.items = True             # 아이템전 여부
@@ -128,6 +129,8 @@ class RoomServer(object):
                 with self.lock:
                     info = {'game': 'kart3d', 'name': self.name, 'port': self.port, 'map': self.map,
                             'players': len(self.conns), 'state': self.state}
+                    if self.cmap:
+                        info['cname'] = str(self.cmap.get('name', ''))[:20]
                 try:
                     self.udp.sendto(json.dumps(info).encode('utf-8'), addr)
                 except Exception:
@@ -180,7 +183,7 @@ class RoomServer(object):
     def _room_msg(self):
         with self.lock:
             return {'t': 'room', 'host': self.host_id, 'map': self.map, 'laps': self.laps, 'bots': self.bots, 'items': self.items, 'state': self.state,
-                    'players': [{'id': c.id, 'name': c.name, 'kart': c.kart} for c in self.conns.values()]}
+                    'cmap': self.cmap, 'players': [{'id': c.id, 'name': c.name, 'kart': c.kart} for c in self.conns.values()]}
 
     def _broadcast(self, obj, exclude=None):
         data = (json.dumps(obj, separators=(',', ':')) + '\n').encode('utf-8')
@@ -238,6 +241,10 @@ class RoomServer(object):
             if self.host_id == c.id and self.state == 'lobby':
                 if 'map' in m:
                     self.map = int(clamp(int(m['map']), 1, MAP_COUNT))
+                    if 'cmap' not in m:
+                        self.cmap = None             # 기본 맵을 고르면 '만든 맵' 해제
+                if 'cmap' in m:
+                    self.cmap = cmap_clean(m['cmap']) if m['cmap'] else None
                 if 'laps' in m:
                     self.laps = int(clamp(int(m['laps']), 1, 10))
                 if 'bots' in m:
@@ -257,7 +264,8 @@ class RoomServer(object):
                     bots = []
                     for i in range(min(self.bots, self.MAX_PLAYERS - len(order))):
                         bots.append({'id': 'b%d' % (i + 1), 'name': 'BOT %d' % (i + 1), 'kart': random.randrange(KART_COUNT), 'slot': len(order) + i})
-                    msg = {'t': 'start', 'map': self.map, 'laps': self.laps, 'countdown': 5.0, 'players': order, 'bots': bots, 'items': self.items}
+                    msg = {'t': 'start', 'map': self.map, 'laps': self.laps, 'countdown': 5.0, 'players': order, 'bots': bots, 'items': self.items,
+                           'cmap': self.cmap}
                 self._broadcast(msg)
         elif t == 'lobby':
             if self.host_id == c.id:
@@ -427,7 +435,7 @@ class Session(object):
         self.my_id = None
         self.host_id = None
         self.players = []
-        self.settings = {'map': 1, 'laps': 3, 'bots': 0, 'items': True}
+        self.settings = {'map': 1, 'laps': 3, 'bots': 0, 'items': True, 'cmap': None}
         self.start_msg = None
         self.address = ''
         self._joined = False
@@ -436,11 +444,12 @@ class Session(object):
     def is_host(self):
         return self.my_id is not None and self.my_id == self.host_id
 
-    def host_game(self, port=DEFAULT_PORT):
+    def host_game(self, port=DEFAULT_PORT, cmap=None):
         self.leave()
         try:
             self.server = RoomServer(port, name=self.profile.display_name()).start()
             self.server.map = int(self.profile['map'])
+            self.server.cmap = cmap_clean(cmap) if cmap else None
             self.server.laps = int(self.profile['laps'])
             self.server.items = self.profile['mode'] == 'item'
         except Exception as e:
@@ -483,10 +492,14 @@ class Session(object):
             elif t == 'room':
                 self.host_id = m.get('host')
                 self.players = m.get('players', [])
-                self.settings = {'map': m.get('map', 1), 'laps': m.get('laps', 3), 'bots': m.get('bots', 0), 'items': bool(m.get('items', False))}
+                cm = m.get('cmap')
+                self.settings = {'map': m.get('map', 1), 'laps': m.get('laps', 3), 'bots': m.get('bots', 0), 'items': bool(m.get('items', False)),
+                                 'cmap': cmap_clean(cm) if cm else None}
                 if self.state in ('connecting', 'idle'):
                     self.state = 'lobby'
             elif t == 'start':
+                cm = m.get('cmap')
+                m['cmap'] = cmap_clean(cm) if cm else None
                 self.start_msg = m
                 self.state = 'racing'
             elif t == 'tolobby':

@@ -94,6 +94,9 @@ class App(object):
         self.show_fps = bool(args.get('fps'))
         self.finish_at = None
         self.ping = 0.0
+        self.store = MapStore()           # 내가 만든 맵 목록
+        self.maker = PhoneMapMaker(self)  # 맵 만들기 화면
+        self.test_map = None              # 편집기에서 '시험 주행' 중인 맵
 
     # ------------------------------------------------------------------ 공통 도우미
     @property
@@ -205,6 +208,16 @@ class App(object):
                 self.keys.discard(e.key)
             elif e.type == getattr(pygame, 'VIDEORESIZE', -1):
                 pass
+            elif self.scene == 'editor' and e.type == getattr(pygame, 'MOUSEWHEEL', -1):
+                self.maker.wheel += e.y
+            elif self.scene == 'editor' and e.type in (pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP) and getattr(e, 'button', 1) in (2, 3, 4, 5):
+                if e.button in (2, 3):
+                    self.maker.rdrag = e.pos if e.type == pygame.MOUSEBUTTONDOWN else None
+            elif self.scene == 'editor' and e.type == pygame.MOUSEMOTION and self.maker.rdrag is not None:
+                a = self.maker.rdrag
+                if self.maker.view is not None:
+                    self.maker.pan(e.pos[0] - a[0], e.pos[1] - a[1])
+                self.maker.rdrag = e.pos
             else:
                 self.ptr.handle(e, self.W, self.H)
         if self.screen.get_size() != (self.W, self.H):
@@ -217,9 +230,11 @@ class App(object):
             self.toggle_pause()
         elif self.scene == 'results':
             self.leave_race()
-        elif self.scene in ('solo', 'garage', 'settings', 'multi'):
+        elif self.scene in ('solo', 'garage', 'settings', 'multi', 'maps'):
             self.profile.save()
             self.go('menu')
+        elif self.scene == 'editor':
+            self.maker.on_back()
         elif self.scene == 'lobby':
             self.session.leave()
             self.go('menu')
@@ -254,17 +269,29 @@ class App(object):
         return {'steer': self.steer, 'throttle': 1.0 if (gas or (auto and not brake)) else 0.0, 'brake': 1.0 if brake else 0.0, 'drift': drift}, pressed
 
     # ------------------------------------------------------------------ 레이스
+    def solo_map(self):
+        """솔로로 달릴 맵: 시험 주행 중이면 그 맵, '내 맵' 을 골랐으면 그 데이터, 아니면 기본 맵 번호"""
+        if self.test_map is not None:
+            return self.test_map
+        if self.profile['map_src'] == 'custom':
+            d = self.store.get(self.profile['cmap'])
+            if d is not None:
+                return d
+        return int(self.profile['map'])
+
     def start_solo(self):
         p = self.profile
         entries = solo_entries(p.display_name(), p['kart'], int(p['bots']))
-        self.start_race(int(p['map']), int(p['laps']), entries, False, True, 5.0, p['mode'] == 'item')
+        ref = self.solo_map()
+        self.start_race(ref, int(p['laps']) if self.test_map is None else int(ref['laps']), entries, False, True,
+                        5.0 if self.test_map is None else 3.0, p['mode'] == 'item')
 
     def use_item(self, slot):
         if self.race is not None and self.race.items is not None and not (self.paused and not self.race.multi):
             self.race.use_item(slot, self.brake_held)
 
     def start_race(self, map_id, laps, entries, multi, is_host, countdown, items=False):
-        self.loading(T('맵 생성 중…', 'Building map…') + ' #%d' % map_id)
+        self.loading(T('맵 생성 중…', 'Building map…') + ' ' + map_title(map_id, LANG))
         self.race = Race(map_id, laps, entries, multi=multi, is_host=is_host, countdown=countdown, net=self.session.net if multi else None, items=items)
         self.hud_top = 0
         self.renderer.set_track(self.race.track)
@@ -306,6 +333,12 @@ class App(object):
         self.show_map = None
         if multi:
             self.session.leave()
+        if self.test_map is not None:
+            self.test_map = None
+            if self.maker.ed is not None:
+                self.maker.changed()
+                self.go('editor')
+                return
         self.go('menu')
 
     def handle_race_events(self, race):
@@ -339,6 +372,12 @@ class App(object):
                 elif e in ('wall', 'bump'):
                     self.sfx.play('bump')
                     self.renderer.shake = max(self.renderer.shake, 0.6)
+                elif e == 'jump':
+                    self.sfx.play('lap', 0.7)
+                    self.toast(T('점프!', 'JUMP!'), 0.7, (255, 225, 80))
+                elif e == 'oil':
+                    self.sfx.play('ihit', 0.6)
+                    self.toast(T('미끌!', 'SLIPPERY!'), 0.8, (190, 150, 255))
                 elif e.startswith('tier'):
                     self.sfx.play('tier')
 
@@ -593,7 +632,7 @@ class App(object):
 
     # ------------------------------------------------------------------ 맵 선택기
     def outline(self, mid, w, h):
-        key = (mid, w, h)
+        key = (mid if not isinstance(mid, dict) else ('c', cmap_key(mid)), w, h)
         hit = self.outline_cache.get(key)
         if hit is not None:
             return hit
@@ -670,6 +709,69 @@ class App(object):
                 new = rr_
         return new
 
+    def source_tabs(self, rect, src, enabled=True):
+        """[기본 맵 1000] [내가 만든 맵] 전환 -> 새 값"""
+        ui = self.ui
+        u = ui.u
+        half = (rect.w - 8 * u) / 2.0
+        if ui.button(self.screen, R(rect.x, rect.y, half, rect.h), T('기본 맵 1000개', 'Built-in maps'), 'chipon' if src != 'custom' else 'chip',
+                     size=rect.h * 0.4, enabled=enabled):
+            src = 'builtin'
+        if ui.button(self.screen, R(rect.x + half + 8 * u, rect.y, half, rect.h), T('내가 만든 맵 (%d)' % len(self.store.maps), 'My maps (%d)' % len(self.store.maps)),
+                     'chipon' if src == 'custom' else 'chip', size=rect.h * 0.4, enabled=enabled):
+            src = 'custom'
+        return src
+
+    def custom_view(self, rect, d, title=None):
+        """만든 맵 정보 + 코스 모양 (읽기 전용)"""
+        ui = self.ui
+        u = ui.u
+        surf = self.screen
+        ui.panel(surf, rect, 195)
+        pad = int(12 * u)
+        x, y, w = rect.x + pad, rect.y + pad, rect.w - 2 * pad
+        ui.text(surf, title or T('내가 만든 맵', 'Custom map'), x, y, 20 * u, (255, 200, 90))
+        ui.text(surf, map_title(d, LANG), x, y + 24 * u, 30 * u)
+        oh = int(max(40 * u, rect.h - 150 * u))
+        out, length = self.outline(d, int(w), oh)
+        th = biome(d['look'])
+        nobs = sum(1 for o in d['objs'] if OBJ_INFO[o[0]]['cat'] == 'obs')
+        ui.text(surf, T('%s · %.2f km · 장애물 %d · 물건 %d', '%s · %.2f km · %d obstacles · %d objects') % (th['name'] if LANG == 'ko' else th['en'], length / 1000.0, nobs, len(d['objs'])),
+                x, y + 58 * u, 18 * u, (190, 205, 240))
+        surf.blit(out, (x, y + 84 * u))
+        return y + 88 * u + oh
+
+    def custom_picker(self, rect, editable=True, allow_edit=True):
+        """'내 맵' 고르기 (◀ ▶ 로 바꾸기 + 편집). 반환: 고른 맵 데이터 또는 None"""
+        ui = self.ui
+        u = ui.u
+        surf = self.screen
+        maps = self.store.maps
+        if not maps:
+            ui.panel(surf, rect, 195)
+            ui.text(surf, T('아직 만든 맵이 없어요', 'You have no custom maps yet'), rect.x + 16 * u, rect.y + 20 * u, 26 * u)
+            if ui.button(surf, R(rect.x + 16 * u, rect.y + 70 * u, min(rect.w - 32 * u, 320 * u), 56 * u), T('맵 만들러 가기', 'Open map maker'), 'good', enabled=editable):
+                self.go('maps')
+            return None
+        i = max(0, self.store.index(self.profile['cmap']))
+        d = maps[i]
+        bh = max(36 * u, min(50 * u, rect.h * 0.12))
+        body = R(rect.x, rect.y, rect.w, rect.h - bh - 8 * u)
+        self.custom_view(body, d)
+        y = body.bottom + 8 * u
+        bw = (rect.w - 16 * u) / (3.0 if allow_edit else 2.0)
+        if ui.button(surf, R(rect.x, y, bw, bh), '<', 'normal', size=bh * 0.5, enabled=editable and len(maps) > 1):
+            i = (i - 1) % len(maps)
+        if ui.button(surf, R(rect.x + bw + 8 * u, y, bw, bh), '>  %d/%d' % (i + 1, len(maps)), 'normal', size=bh * 0.4, enabled=editable and len(maps) > 1):
+            i = (i + 1) % len(maps)
+        if allow_edit and ui.button(surf, R(rect.x + 2 * (bw + 8 * u), y, bw, bh), T('편집', 'Edit'), 'good', size=bh * 0.42, enabled=editable):
+            self.maker.open(d, d['uid'])
+            return d
+        d = maps[i]
+        if self.profile['cmap'] != d['uid']:
+            self.profile['cmap'] = d['uid']
+        return d
+
     # ------------------------------------------------------------------ 메뉴
     def scene_menu(self, dt):
         ui = self.ui
@@ -690,10 +792,11 @@ class App(object):
         ui.text(surf, tag, x, int(self.H * 0.05) + 160 * u, tsz, (205, 220, 250), anc)
         bw = self.W * 0.40 if land else self.W * 0.82
         bx = int(self.W * 0.06) if land else (self.W - bw) / 2
-        by = self.H * 0.43 if land else self.H * 0.40
-        bh = min(self.H * 0.095, 60 * u)
+        by = self.H * 0.40 if land else self.H * 0.40
+        bh = min(self.H * 0.085, 58 * u)
         gap = bh * 0.2
         items = [(T('솔로 레이스', 'Solo race'), 'solo', 'primary'), (T('WiFi 멀티플레이', 'WiFi multiplayer'), 'multi', 'primary'),
+                 (T('맵 만들기', 'Map maker'), 'maps', 'good'),
                  (T('차고 (카트 꾸미기)', 'Garage (customize)'), 'garage', 'normal'), (T('설정', 'Settings'), 'settings', 'normal')]
         for i, (lab, tgt, kind) in enumerate(items):
             if ui.button(surf, R(bx, by + i * (bh + gap), bw, bh), lab, kind):
@@ -719,7 +822,18 @@ class App(object):
         else:
             pr = R(m, m, self.W - 2 * m, self.H * 0.58)
             rr = R(m, self.H * 0.58 + 2 * m, self.W - 2 * m, self.H * 0.42 - 3 * m)
-        self.sel_map = self.map_picker(pr, self.sel_map)
+        tab_h = int(min(46 * u, pr.h * 0.1))
+        src = self.source_tabs(R(pr.x, pr.y, pr.w, tab_h), self.profile['map_src'])
+        if src != self.profile['map_src']:
+            self.profile['map_src'] = src
+            self.profile.save()
+        body = R(pr.x, pr.y + tab_h + 8 * u, pr.w, pr.h - tab_h - 8 * u)
+        if src == 'custom':
+            self.custom_picker(body)
+            if self.scene != 'solo':
+                return
+        else:
+            self.sel_map = self.map_picker(body, self.sel_map)
         ui.panel(surf, rr, 195)
         x, y, w = rr.x + 14 * u, rr.y + 14 * u, rr.w - 28 * u
         ui.text(surf, T('레이스 설정', 'Race settings'), x, y, 28 * u, (255, 255, 255))
@@ -868,6 +982,10 @@ class App(object):
             LANG = ('ko' if self.font_path else 'en') if code == 'auto' else code
             self.profile.save()
         chips(T('그래픽 품질', 'Graphics'), [T('낮음', 'Low'), T('중간', 'Medium'), T('높음', 'High')], self.renderer.q, pick_quality)
+        y -= 6 * u * kk
+        ui.text(surf, T('높음 = 디테일을 줄이지 않는 원래 그래픽 · 낮음/중간 = 먼 곳 디테일을 줄여서 더 빠르게',
+                        'High = full original detail · Low/Medium = less distant detail for speed'), x, y, 16 * u * kk, (170, 190, 230))
+        y += 24 * u * kk
         chips(T('조향 반응 (키보드/버튼)', 'Steering response (keys/buttons)'), [T('부드럽게', 'Smooth'), T('보통', 'Normal'), T('빠르게', 'Quick')], int(self.profile['steer_resp']), pick_steer)
         for key, lab in (('auto_gas', T('자동 가속 (터치)', 'Auto gas (touch)')), ('sound', T('소리', 'Sound'))):
             on = bool(self.profile[key])
@@ -925,7 +1043,9 @@ class App(object):
         bh = 56 * u
         half = (w - 12 * u) / 2.0
         if ui.button(surf, R(x, y, half, bh), T('방 만들기 (호스트)', 'Host a game'), 'primary'):
-            if self.session.host_game(int(self.profile['port'])):
+            cm = self.store.get(self.profile['cmap']) if self.profile['map_src'] == 'custom' else None
+            self.lobby_src = 'custom' if cm else 'builtin'
+            if self.session.host_game(int(self.profile['port']), cm):
                 self.scene = 'lobby'
             else:
                 self.err = self.session.error
@@ -942,7 +1062,8 @@ class App(object):
         elif not rooms:
             ui.text(surf, T('방을 찾지 못했어요. 친구가 [방 만들기] 후 IP 로 접속하세요.', 'No rooms found. Ask a friend to host, then use Join by IP.'), x, y, 18 * u, (190, 205, 240))
         for i, rm in enumerate(rooms[:5]):
-            label = '%s  %s  ·  %d/%d  ·  #%s  ·  %s' % (rm.get('name', 'room'), rm['ip'], rm.get('players', 0), RoomServer.MAX_PLAYERS, rm.get('map', '?'), rm.get('state', ''))
+            mlab = (u'\u2605 ' + str(rm['cname'])) if rm.get('cname') else '#%s' % rm.get('map', '?')
+            label = '%s  %s  ·  %d/%d  ·  %s  ·  %s' % (rm.get('name', 'room'), rm['ip'], rm.get('players', 0), RoomServer.MAX_PLAYERS, mlab, rm.get('state', ''))
             if ui.button(surf, R(x, y, w, 48 * u), label, 'normal', size=19 * u, enabled=rm.get('state') == 'lobby'):
                 self.profile['last_ip'] = rm['ip']
                 self.session.join_game(rm['ip'], rm.get('port', DEFAULT_PORT))
@@ -967,7 +1088,8 @@ class App(object):
             msg = ses.start_msg
             ses.start_msg = None
             entries = ses.entries_from_start(msg)
-            self.start_race(int(msg['map']), int(msg['laps']), entries, True, ses.is_host, float(msg.get('countdown', 5.0)), bool(msg.get('items')))
+            ref = msg.get('cmap') or int(msg['map'])
+            self.start_race(ref, int(msg['laps']), entries, True, ses.is_host, float(msg.get('countdown', 5.0)), bool(msg.get('items')))
             return
         if ses.state == 'idle':
             self.err = ses.error or T('연결이 끊어졌어요', 'Disconnected')
@@ -1009,10 +1131,41 @@ class App(object):
             return
         # 오른쪽: 설정
         st = ses.settings
-        mid = self.map_picker(R(rr.x, rr.y, rr.w, rr.h - 196 * u), int(st['map']), editable=ses.is_host)
-        if ses.is_host and mid != st['map']:
-            ses.send_settings(map=mid)
-            self.profile['map'] = mid
+        prect = R(rr.x, rr.y, rr.w, rr.h - 196 * u)
+        cm = st.get('cmap')
+        if ses.is_host:
+            tab_h = int(min(42 * u, prect.h * 0.1))
+            if getattr(self, 'lobby_src', None) is None:
+                self.lobby_src = 'custom' if cm else 'builtin'
+            src = self.source_tabs(R(prect.x, prect.y, prect.w, tab_h), self.lobby_src)
+            self.lobby_src = src
+            body = R(prect.x, prect.y + tab_h + 6 * u, prect.w, prect.h - tab_h - 6 * u)
+            if src == 'custom':
+                d = self.custom_picker(body, editable=True, allow_edit=False)
+                if self.scene != 'lobby':
+                    return
+                if d is not None and (cm is None or cmap_key(cm) != cmap_key(d) or cm.get('name') != d['name']):
+                    if time.time() - getattr(self, '_cm_sent', 0.0) > 0.6:      # 서버가 되돌려줄 때까지 반복 전송 안 함
+                        ses.send_settings(cmap=d)
+                        self._cm_sent = time.time()
+                    self.profile['map_src'] = 'custom'
+            else:
+                if cm is not None and time.time() - getattr(self, '_cm_sent', 0.0) > 0.6:
+                    ses.send_settings(map=int(st['map']))
+                    self._cm_sent = time.time()
+                mid = self.map_picker(body, int(st['map']), editable=True)
+                if mid != st['map']:
+                    ses.send_settings(map=mid)
+                    self.profile['map'] = mid
+                self.profile['map_src'] = 'builtin'
+        elif cm:
+            bh = 46 * u
+            self.custom_view(R(prect.x, prect.y, prect.w, prect.h - bh - 8 * u), cm, T('방장이 고른 맵 (직접 만든 맵)', "Host's custom map"))
+            if ui.button(surf, R(prect.x, prect.bottom - bh, prect.w, bh), T('이 맵을 내 맵에 저장', 'Save this map to My maps'), 'good', size=bh * 0.4):
+                if self.store.add_copy(cm):
+                    self.toast(T('내 맵에 저장했어요', 'Saved to My maps'), 2.0)
+        else:
+            self.map_picker(prect, int(st['map']), editable=False)
         ui.panel(surf, R(rr.x, rr.bottom - 186 * u, rr.w, 186 * u), 205)
         sx, sy, sw_ = rr.x + 14 * u, rr.bottom - 180 * u, rr.w - 28 * u
         half = (sw_ - 12 * u) / 2.0
@@ -1094,5 +1247,9 @@ class App(object):
             self.scene_multi(dt)
         elif sc == 'lobby':
             self.scene_lobby(dt)
+        elif sc == 'maps':
+            self.maker.scene_maps(dt)
+        elif sc == 'editor':
+            self.maker.scene_editor(dt)
         else:
             self.scene = 'menu'
